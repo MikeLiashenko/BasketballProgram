@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>🏀 Баскетбол — матчи онлайн</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app-shell">
+
+    <!-- ============ ЭКРАН 1: ВХОД / РЕГИСТРАЦИЯ ============ -->
+    <section id="screen-login" class="screen active">
+      <div class="login-court"></div>
+      <div class="login-glow"></div>
+      <div class="login-box">
+        <div class="logo-wrap"><div class="logo">🏀</div><div class="logo-shadow"></div></div>
+        <h1 class="brand">БАСКЕТБОЛ</h1>
+        <p class="tagline">Матчи между игроками в реальном времени</p>
+
+        <div class="auth-tabs">
+          <button class="auth-tab active" data-mode="login">Вход</button>
+          <button class="auth-tab" data-mode="register">Регистрация</button>
+          <span class="auth-tab-slider"></span>
+        </div>
+
+        <div id="reg-preview" class="reg-preview" hidden>
+          <div class="avatar-preview" id="avatar-preview">🏀</div>
+        </div>
+
+        <input id="login-nick" class="field" type="text" placeholder="Никнейм" maxlength="16" autocomplete="off" />
+        <input id="login-pin" class="field" type="password" inputmode="numeric" placeholder="PIN-код" maxlength="6" autocomplete="off" />
+
+        <div id="reg-picker" class="reg-picker" hidden>
+          <div class="picker-label">Эмодзи</div>
+          <div class="emoji-grid" id="emoji-grid"></div>
+          <div class="picker-label">Цвет</div>
+          <div class="color-grid" id="color-grid"></div>
+        </div>
+
+        <div id="login-error" class="error-msg"></div>
+        <button id="login-btn" class="btn btn-accent btn-block">Войти</button>
+        <p class="hint" id="login-hint">Ник: 3–16 символов · PIN: 4–6 цифр</p>
+      </div>
+    </section>
+
+    <!-- ============ ЭКРАН 2: ГЛАВНОЕ МЕНЮ ============ -->
+    <section id="screen-menu" class="screen">
+      <header class="topbar">
+        <div class="user-chip">
+          <div id="menu-avatar" class="avatar">?</div>
+          <div class="user-meta">
+            <div id="menu-nick" class="user-name">—</div>
+            <div class="user-stats">
+              <span class="stat-pill">🏀 <b id="menu-stat-matches">0</b></span>
+              <span class="stat-pill">🎯 <b id="menu-stat-acc">0%</b></span>
+            </div>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <button id="history-btn" class="btn-icon ghost" title="История матчей">🕘</button>
+          <button id="sound-btn" class="btn-icon ghost" title="Звук вкл/выкл">🔊</button>
+          <button id="logout-btn" class="btn-icon ghost" title="Выйти из аккаунта">⎋</button>
+        </div>
+      </header>
+
+      <main class="menu-body">
+        <h2 class="section-title">Приглашения</h2>
+        <div id="invites-list" class="invites"></div>
+        <div id="invites-empty" class="empty">
+          <div class="empty-emoji">📭</div>
+          <div>Пока нет активных приглашений</div>
+        </div>
+      </main>
+
+      <footer class="menu-footer">
+        <button id="create-btn" class="btn btn-accent btn-big"><span class="ball-spin">🏀</span> Создать матч</button>
+      </footer>
+    </section>
+
+    <!-- ============ ЭКРАН 3: СОЗДАНИЕ МАТЧА (МАСТЕР) ============ -->
+    <section id="screen-create" class="screen">
+      <header class="topbar">
+        <button class="btn-icon ghost" data-nav="menu">‹</button>
+        <div class="topbar-title">Создание матча</div>
+        <div class="topbar-spacer"></div>
+      </header>
+
+      <div class="steps-indicator">
+        <span class="dot active" data-step="1"></span>
+        <span class="dot" data-step="2"></span>
+        <span class="dot" data-step="3"></span>
+      </div>
+
+      <main class="wizard">
+        <!-- Шаг 1: тип матча -->
+        <div class="wstep active" data-wstep="1">
+          <h2 class="section-title">Тип матча</h2>
+          <button id="type-normal" class="choice-card selected">
+            <div class="choice-ic">🏀</div>
+            <div>
+              <div class="choice-title">Обычный</div>
+              <div class="choice-desc">Броски по очереди. Попал — бросаешь ещё</div>
+            </div>
+          </button>
+          <button id="type-advanced" class="choice-card disabled" disabled>
+            <div class="choice-ic">🔒</div>
+            <div>
+              <div class="choice-title">Продвинутый</div>
+              <div class="choice-desc">Скоро</div>
+            </div>
+          </button>
+          <div class="wizard-nav">
+            <span></span>
+            <button class="btn btn-accent" data-goto="2">Далее ›</button>
+          </div>
+        </div>
+
+        <!-- Шаг 2: тип цели -->
+        <div class="wstep" data-wstep="2">
+          <h2 class="section-title">Как определяем победителя</h2>
+
+          <button class="choice-card" data-goal="individual">
+            <div class="choice-ic">🔥</div>
+            <div>
+              <div class="choice-title">Свободный</div>
+              <div class="choice-desc">Без цели. Играете сколько хотите — создатель жмёт «Завершить», и матч заканчивается <b>с текущим счётом</b>. Побеждает лучший.</div>
+            </div>
+          </button>
+
+          <button class="choice-card" data-goal="common">
+            <div class="choice-ic">🎯</div>
+            <div>
+              <div class="choice-title">На цель</div>
+              <div class="choice-desc">Каждому нужно набрать <b>N попаданий</b>. Достиг цели — отдыхаешь, остальные доигрывают. Кто раньше — тот выше.</div>
+            </div>
+          </button>
+
+          <div id="target-wrap" class="target-wrap" hidden>
+            <label>Сколько попаданий нужно каждому?</label>
+            <div class="stepper">
+              <button class="btn-icon" data-target="-1">−</button>
+              <input id="target-input" type="number" min="1" max="99" value="10" />
+              <button class="btn-icon" data-target="1">+</button>
+            </div>
+          </div>
+
+          <div class="wizard-nav">
+            <button class="btn btn-ghost" data-goto="1">‹ Назад</button>
+            <button class="btn btn-accent" data-goto="3">Далее ›</button>
+          </div>
+        </div>
+
+        <!-- Шаг 3: выбор игроков -->
+        <div class="wstep" data-wstep="3">
+          <h2 class="section-title">Кого позвать</h2>
+          <input id="user-search" class="field search-input" type="text" placeholder="🔍  Поиск по нику..." autocomplete="off" />
+          <div id="user-list" class="user-list"></div>
+          <div class="wizard-nav">
+            <button class="btn btn-ghost" data-goto="2">‹ Назад</button>
+            <button id="send-invites-btn" class="btn btn-accent">Отправить приглашения</button>
+          </div>
+        </div>
+      </main>
+    </section>
+
+    <!-- ============ ЭКРАН 4: ЛОББИ ============ -->
+    <section id="screen-lobby" class="screen">
+      <header class="topbar">
+        <div class="topbar-title" id="lobby-title">Лобби</div>
+      </header>
+      <main class="menu-body">
+        <div id="lobby-info" class="lobby-info"></div>
+        <div id="lobby-players" class="lobby-players"></div>
+      </main>
+      <footer class="menu-footer stack">
+        <button id="start-btn" class="btn btn-accent btn-big" disabled>Начать матч</button>
+        <button id="lobby-leave-btn" class="btn btn-ghost">Выйти</button>
+      </footer>
+    </section>
+
+    <!-- ============ ЭКРАН 5: МАТЧ (ДЖУМБОТРОН) ============ -->
+    <section id="screen-match" class="screen">
+      <div class="m-spot"></div>
+      <div class="m-floor"></div>
+
+      <div class="hoop-zone">
+        <svg class="hoop" viewBox="0 0 400 300" id="hoop-svg">
+          <rect class="backboard" x="118" y="18" width="164" height="118" rx="14"/>
+          <rect class="board-sq" x="168" y="60" width="64" height="46" rx="4"/>
+          <path class="rim-back" d="M136 152 A64 16 0 0 1 264 152"/>
+          <g class="net" id="hoop-net"></g>
+          <path class="rim-front" d="M136 152 A64 16 0 0 0 264 152"/>
+        </svg>
+      </div>
+
+      <div class="turnline" id="match-turn">—</div>
+
+      <div class="board">
+        <div class="board-title" id="match-target">ТАБЛО</div>
+        <div class="thead"><span class="r">TOP</span><span>ИГРОК</span><span class="r">ПОПАЛ</span><span class="r">СЕРИЯ</span></div>
+        <div class="tbody" id="match-players"></div>
+      </div>
+
+      <div class="bar">
+        <button class="ic stop" id="finish-btn" title="Завершить матч" hidden><svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="3.2" fill="currentColor"/></svg></button>
+        <button class="ic pause" id="leave-btn" title="Выйти из матча"><svg viewBox="0 0 24 24"><rect x="7" y="5" width="4" height="14" rx="1.6" fill="currentColor"/><rect x="13" y="5" width="4" height="14" rx="1.6" fill="currentColor"/></svg></button>
+        <button class="shot make" id="btn-hit" disabled><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Попал</span></button>
+        <button class="shot miss" id="btn-miss" disabled><svg viewBox="0 0 24 24"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round"/></svg><span>Промах</span></button>
+      </div>
+
+      <div class="pop" id="match-pop"></div>
+      <svg class="ball" id="match-ball" viewBox="0 0 100 100" style="opacity:0">
+        <defs><radialGradient id="mbg" cx="38%" cy="32%" r="72%">
+          <stop offset="0%" stop-color="#ffb27a"/><stop offset="55%" stop-color="#ff7a2e"/><stop offset="100%" stop-color="#d1541a"/>
+        </radialGradient></defs>
+        <circle cx="50" cy="50" r="46" fill="url(#mbg)"/>
+        <g fill="none" stroke="#3a1608" stroke-width="2.4" opacity=".85">
+          <circle cx="50" cy="50" r="46"/><line x1="50" y1="4" x2="50" y2="96"/><line x1="4" y1="50" x2="96" y2="50"/>
+          <path d="M15 18 Q50 50 15 82"/><path d="M85 18 Q50 50 85 82"/>
+        </g>
+      </svg>
+    </section>
+
+    <!-- ============ ЭКРАН 6: РЕЗУЛЬТАТЫ ============ -->
+    <section id="screen-results" class="screen">
+      <div id="confetti" class="confetti"></div>
+      <header class="topbar">
+        <div class="topbar-title">Итоги матча</div>
+      </header>
+      <main class="menu-body">
+        <div id="results-winner" class="winner-banner"></div>
+        <div id="results-list" class="results-list"></div>
+      </main>
+      <footer class="menu-footer">
+        <button id="results-menu-btn" class="btn btn-accent btn-big">В меню</button>
+      </footer>
+    </section>
+
+    <!-- ============ ЭКРАН 7: ИСТОРИЯ МАТЧЕЙ ============ -->
+    <section id="screen-history" class="screen">
+      <header class="topbar">
+        <button class="btn-icon ghost" data-nav="menu">‹</button>
+        <div class="topbar-title">История матчей</div>
+        <div class="topbar-spacer"></div>
+      </header>
+      <main class="menu-body">
+        <div id="history-list" class="history-list"></div>
+        <div id="history-empty" class="empty">
+          <div class="empty-emoji">📜</div>
+          <div>Ты ещё не сыграл ни одного матча</div>
+        </div>
+      </main>
+    </section>
+
+  </div>
+
+  <!-- ============ МОДАЛКА (замена confirm/alert) ============ -->
+  <div id="modal-backdrop" class="modal-backdrop" hidden>
+    <div class="modal">
+      <div class="modal-icon" id="modal-icon">🤔</div>
+      <div class="modal-text" id="modal-text"></div>
+      <div class="modal-actions">
+        <button id="modal-cancel" class="btn btn-ghost">Отмена</button>
+        <button id="modal-ok" class="btn btn-accent">ОК</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ МОДАЛКА ПРОФИЛЯ (аватар/цвет) ============ -->
+  <div id="profile-backdrop" class="modal-backdrop" hidden>
+    <div class="modal">
+      <div class="avatar-preview" id="profile-preview">🏀</div>
+      <div class="modal-text">Твой аватар</div>
+      <div class="picker-label">Эмодзи</div>
+      <div class="emoji-grid" id="profile-emoji"></div>
+      <div class="picker-label">Цвет</div>
+      <div class="color-grid" id="profile-color"></div>
+      <div class="modal-actions">
+        <button id="profile-cancel" class="btn btn-ghost">Отмена</button>
+        <button id="profile-save" class="btn btn-accent">Сохранить</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Firebase (compat SDK) -->
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-database-compat.js"></script>
+  <script src="scripts.js"></script>
+</body>
+</html>
