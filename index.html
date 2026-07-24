@@ -27,8 +27,10 @@
           <span class="auth-tab-slider"></span>
         </div>
 
-        <div id="reg-preview" class="reg-preview" hidden>
+<div id="reg-preview" class="reg-preview" hidden>
           <div class="avatar-preview" id="avatar-preview">🏀</div>
+          <button class="btn-icon ghost photo-btn" id="reg-photo-btn" title="Загрузить фото" type="button">📷</button>
+          <input type="file" id="reg-photo-file" accept="image/jpeg, image/png, image/webp" hidden />
         </div>
 
         <input id="login-nick" class="field" type="text" placeholder="Никнейм" maxlength="16" autocomplete="off" />
@@ -187,7 +189,7 @@
       <div class="m-spot"></div>
       <div class="m-floor"></div>
 
-      <div class="hoop-zone">
+<div class="hoop-zone">
         <svg class="hoop" viewBox="0 0 400 300" id="hoop-svg">
           <rect class="backboard" x="118" y="18" width="164" height="118" rx="14"/>
           <rect class="board-sq" x="168" y="60" width="64" height="46" rx="4"/>
@@ -204,6 +206,13 @@
         <div class="thead"><span class="r">TOP</span><span>ИГРОК</span><span class="r">ПОПАЛ</span><span class="r">СЕРИЯ</span></div>
         <div class="tbody" id="match-players"></div>
       </div>
+
+      <!-- НОВЫЙ БЛОК ЛЕНТЫ СОБЫТИЙ -->
+      <div class="events-panel" id="match-events-panel">
+        <div class="events-title">Ход матча</div>
+        <div class="events-feed" id="match-events-feed"></div>
+      </div>
+      <!-- КОНЕЦ НОВОГО БЛОКА -->
 
       <div class="bar">
         <button class="ic stop" id="finish-btn" title="Завершить матч" hidden><svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="3.2" fill="currentColor"/></svg></button>
@@ -271,9 +280,14 @@
   </div>
 
   <!-- ============ МОДАЛКА ПРОФИЛЯ (аватар/цвет) ============ -->
+<!-- ============ МОДАЛКА ПРОФИЛЯ (аватар/цвет) ============ -->
   <div id="profile-backdrop" class="modal-backdrop" hidden>
     <div class="modal">
       <div class="avatar-preview" id="profile-preview">🏀</div>
+      <!-- Кнопка и инпут для загрузки фото в профиле -->
+      <button class="btn-icon ghost photo-btn" id="prof-photo-btn" title="Загрузить фото" type="button" style="margin: 10px auto;">📷</button>
+      <input type="file" id="prof-photo-file" accept="image/jpeg, image/png, image/webp" hidden />
+      
       <div class="modal-text">Твой аватар</div>
       <div class="picker-label">Эмодзи</div>
       <div class="emoji-grid" id="profile-emoji"></div>

@@ -303,9 +303,9 @@ b { font-weight: 700; }
 .streak { font-size: 12px; color: var(--accent); font-weight: 700; background: var(--accent-soft); padding: 3px 9px; border-radius: 20px; }
 .pc-medal { font-size: 17px; }
 .pc-rest { font-size: 10.5px; color: var(--muted); background: var(--glass-2); padding: 3px 9px; border-radius: 20px; text-transform: uppercase; letter-spacing: .04em; }
-.events-panel { background: var(--glass); border: 1px solid var(--hairline); border-radius: var(--radius); padding: 16px; box-shadow: var(--edge); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); }
+.events-panel { background: var(--glass); border: 1px solid var(--hairline); border-radius: var(--radius); padding: 16px; box-shadow: var(--edge); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); margin: 0 16px; flex: 1; display: flex; flex-direction: column; min-height: 0; }
 .events-title { font-size: 11px; text-transform: uppercase; color: var(--faint); margin-bottom: 12px; letter-spacing: .14em; font-weight: 600; }
-.events-feed { display: flex; flex-direction: column; gap: 8px; max-height: 176px; overflow-y: auto; }
+.events-feed { display: flex; flex-direction: column; gap: 8px; flex: 1; overflow-y: auto; padding-right: 4px; }
 .event-item { font-size: 13.5px; padding: 10px 12px; background: rgba(0,0,0,.22); border-radius: 11px; border-left: 2px solid var(--hairline-2); font-weight: 500; animation: evIn .3s var(--ease); }
 @keyframes evIn { from { opacity: 0; transform: translateY(-5px); } to { opacity: 1; transform: none; } }
 .event-item.hit    { border-left-color: var(--green); }
@@ -419,15 +419,15 @@ b { font-weight: 700; }
 #screen-match .turnline b { color: var(--cyan-2); font-weight: 800; font-size: 16px; letter-spacing: .01em; text-transform: none; text-shadow: 0 0 16px rgba(108,201,255,.45); }
 #screen-match .turnline.my { color: var(--green); }
 
-#screen-match .board { position: relative; z-index: 3; margin: 0 16px; background: var(--card2); border: 1px solid var(--hairline); border-radius: 22px; box-shadow: 0 20px 50px rgba(0,0,0,.4), inset 0 1px 0 rgba(255,255,255,.05); padding: 6px 6px; flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+#screen-match .board { position: relative; z-index: 3; margin: 0 16px 16px; background: var(--card2); border: 1px solid var(--hairline); border-radius: 22px; box-shadow: 0 20px 50px rgba(0,0,0,.4), inset 0 1px 0 rgba(255,255,255,.05); padding: 6px 6px; flex: none; max-height: 45vh; display: flex; flex-direction: column; overflow: hidden; }
 #screen-match .board-title { text-align: center; font-size: 12.5px; font-weight: 800; letter-spacing: .22em; padding: 11px 0 12px; background: linear-gradient(180deg,#c9ecff,#5cb4ff); -webkit-background-clip: text; background-clip: text; color: transparent; filter: drop-shadow(0 0 12px rgba(108,201,255,.45)); }
-#screen-match .thead, #screen-match .trow { display: grid; grid-template-columns: 38px 1fr 60px 54px; align-items: center; }
+#screen-match .thead, #screen-match .trow { display: grid; grid-template-columns: 42px 1fr 68px 68px; align-items: center; }
 #screen-match .thead { padding: 0 14px 8px; border-bottom: 1px solid var(--hairline); font-size: 10px; letter-spacing: .16em; text-transform: uppercase; color: rgba(190,205,225,.5); font-weight: 700; }
 #screen-match .thead .r { text-align: center; }
 #screen-match .tbody { overflow-y: auto; flex: 1; }
 #screen-match .trow { padding: 11px 14px; border-bottom: 1px solid rgba(120,160,220,.08); transition: background .3s; }
 #screen-match .trow:last-child { border-bottom: none; }
-#screen-match .trow.active { background: linear-gradient(90deg, rgba(108,201,255,.1), transparent 80%); }
+#screen-match .trow.active { background: linear-gradient(90deg, rgba(108,201,255,.14), transparent 80%); border-radius: 14px; }
 #screen-match .trow.done { opacity: .55; }
 #screen-match .rank { font-size: 15px; font-weight: 800; color: var(--faint); text-align: center; font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
 #screen-match .trow.top1 .rank { background: linear-gradient(180deg,#ffe7a6,#ffbf3d); -webkit-background-clip: text; background-clip: text; color: transparent; filter: drop-shadow(0 0 8px rgba(255,191,61,.5)); }
@@ -476,3 +476,4 @@ b { font-weight: 700; }
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-thumb { background: var(--hairline-2); border-radius: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }
+

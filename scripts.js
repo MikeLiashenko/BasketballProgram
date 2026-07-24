@@ -59,10 +59,12 @@ function hashPin(pin) {
 const AVATARS = ['🏀','🔥','⚡','🐉','🦁','🦅','🐺','🦈','👑','⭐','💪','🎯','🚀','🐻','🦊','😎','👽','🤖','🐸','🦖','🍀','🌟'];
 const COLORS  = ['#ff6a2b','#ff556a','#ffd257','#2fe08a','#45d6ff','#9d8bff','#ff8ac2','#5bd1c4','#a3e635','#f97316','#38bdf8','#c084fc'];
 
-let regAvatar = AVATARS[0];   // выбор при регистрации
+let regAvatar = AVATARS[0];
 let regColor  = COLORS[0];
-let profAvatar = AVATARS[0];  // выбор в модалке профиля
+let regPhoto  = null;         // фото при регистрации
+let profAvatar = AVATARS[0];
 let profColor  = COLORS[0];
+let profPhoto  = null;        // фото в профиле
 
 function hashStr(s) { let h = 0; for (let i = 0; i < (s || '').length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0; return h; }
 function colorFromString(s) { return COLORS[hashStr(s) % COLORS.length]; }
@@ -81,7 +83,30 @@ function shade(hex, pct) {
 
 // obj — user или player-запись (может иметь avatar/color/nickname)
 function colorOf(obj) { return (obj && obj.color) || colorFromString((obj && obj.nickname) || ''); }
-function faceOf(obj)  { return escapeHtml((obj && obj.avatar) || ((obj && obj.nickname) ? obj.nickname.charAt(0) : '?')); }
+function faceOf(obj) { 
+  if (obj && obj.photo) return `<img src="${obj.photo}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;display:block;border:none;">`;
+  return escapeHtml((obj && obj.avatar) || ((obj && obj.nickname) ? obj.nickname.charAt(0) : '?')); 
+}
+
+// Функция сжатия фото до 120x120 px
+function compressImage(file, callback) {
+  if (!file || !file.type.startsWith('image/')) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    const img = new Image();
+    img.onload = () => {
+      const cvs = document.createElement('canvas');
+      const max = 120;
+      let w = img.width, h = img.height;
+      if (w > h) { if (w > max) { h *= max / w; w = max; } } else { if (h > max) { w *= max / h; h = max; } }
+      cvs.width = w; cvs.height = h;
+      cvs.getContext('2d').drawImage(img, 0, 0, w, h);
+      callback(cvs.toDataURL('image/jpeg', 0.85)); // Переводим в легкий base64
+    };
+    img.src = e.target.result;
+  };
+  reader.readAsDataURL(file);
+}
 function avatarBg(color) { const c = color || '#888'; return `background:linear-gradient(135deg, ${c}, ${shade(c, -30)});`; }
 function hexA(hex, a) { const n = parseInt((hex || '#888888').slice(1), 16); return `rgba(${n >> 16},${(n >> 8) & 255},${n & 255},${a})`; }
 
@@ -331,6 +356,7 @@ function init() {
     showScreen('screen-login');
     $('#login-nick').focus();
   }
+  
 }
 
 async function resumeUser() {
@@ -396,11 +422,74 @@ function bindEvents() {
   $$('[data-nav="menu"]').forEach(b => b.addEventListener('click', goMenu));
 
   // --- Мастер: переходы между шагами ---
-  $$('[data-goto]').forEach(b => b.addEventListener('click', () => {
-    const target = +b.dataset.goto;
-    if (target === 3 && !state.wizard.goalType) { flash(b, 'Выбери цель'); return; }
-    goToStep(target);
-  }));
+// --- Мастер: переходы между шагами ---
+// --- Мастер: переходы между шагами ---
+// --- Мастер: переходы между шагами ---
+// Кнопки броска — только СОЗДАТЕЛЮ матча (он судит)
+  const activePlayer = m.players[activeId];
+  const canCreatorShoot = isCreator && activePlayer && !activePlayer.finished && !activePlayer.left;
+  
+  $('#btn-hit').disabled = !canCreatorShoot;
+  $('#btn-miss').disabled = !canCreatorShoot;
+  $('#finish-btn').hidden = !isCreator;   // ⏹ Завершить — только создателю; ⏸ Выйти — всем
+}
+
+  // --- Загрузка фото (регистрация и профиль) ---
+  $('#reg-photo-btn').addEventListener('click', () => $('#reg-photo-file').click());
+  $('#reg-photo-file').addEventListener('change', e => {
+    compressImage(e.target.files[0], base64 => { 
+      regPhoto = base64; 
+      updateRegPreview(); 
+    });
+  });
+
+  $('#prof-photo-btn').addEventListener('click', () => $('#prof-photo-file').click());
+  $('#prof-photo-file').addEventListener('change', e => {
+    compressImage(e.target.files[0], base64 => { 
+      profPhoto = base64; 
+      $('#profile-preview').innerHTML = `<img src="${base64}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;">`; 
+    });
+  });
+
+  // --- Загрузка фото (регистрация и профиль) ---
+  $('#reg-photo-btn').addEventListener('click', () => $('#reg-photo-file').click());
+  $('#reg-photo-file').addEventListener('change', e => {
+    compressImage(e.target.files[0], base64 => { 
+      regPhoto = base64; 
+      updateRegPreview(); 
+    });
+  });
+
+  $('#prof-photo-btn').addEventListener('click', () => $('#prof-photo-file').click());
+  $('#prof-photo-file').addEventListener('change', e => {
+    compressImage(e.target.files[0], base64 => { 
+      profPhoto = base64; 
+      $('#profile-preview').innerHTML = `<img src="${base64}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;">`; 
+    });
+  });
+
+  $('#prof-photo-btn').addEventListener('click', () => $('#prof-photo-file').click());
+  $('#prof-photo-file').addEventListener('change', e => {
+    compressImage(e.target.files[0], base64 => { 
+      profPhoto = base64; 
+      $('#profile-preview').innerHTML = `<img src="${base64}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;">`; 
+    });
+  });
+  $('#reg-photo-file').addEventListener('change', e => {
+    compressImage(e.target.files[0], base64 => { 
+      regPhoto = base64; 
+      updateRegPreview(); 
+    });
+  });
+
+  $('#prof-photo-btn').addEventListener('click', () => $('#prof-photo-file').click());
+  $('#prof-photo-file').addEventListener('change', e => {
+    compressImage(e.target.files[0], base64 => { 
+      profPhoto = base64; 
+      $('#profile-preview').innerHTML = `<img src="${base64}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;">`; 
+    });
+  });
+  
 
   // --- Шаг 2: выбор цели ---
   $$('[data-goal]').forEach(card => card.addEventListener('click', () => {
@@ -417,8 +506,15 @@ function bindEvents() {
     v = Math.max(1, Math.min(99, v));
     inp.value = v; state.wizard.targetHits = v;
   }));
-  $('#target-input').addEventListener('input', e => {
-    state.wizard.targetHits = Math.max(1, Math.min(99, parseInt(e.target.value, 10) || 1));
+$('#target-input').addEventListener('input', e => {
+    const val = parseInt(e.target.value, 10);
+    // Обновляем стейт только если введено реальное число
+    if (!isNaN(val)) state.wizard.targetHits = Math.max(1, Math.min(99, val));
+  });
+  
+  // Возвращаем корректное значение в поле, если юзер стер всё и кликнул в другое место
+  $('#target-input').addEventListener('blur', e => {
+    e.target.value = state.wizard.targetHits;
   });
 
   // --- Шаг 3: поиск / отправка ---
@@ -448,7 +544,8 @@ function bindEvents() {
   $('#profile-save').addEventListener('click', saveProfile);
   $('#profile-cancel').addEventListener('click', () => { $('#profile-backdrop').hidden = true; });
   $('#profile-backdrop').addEventListener('click', e => { if (e.target.id === 'profile-backdrop') $('#profile-backdrop').hidden = true; });
-}
+
+
 
 function flash(el, msg) {
   const old = el.textContent;
@@ -481,7 +578,11 @@ function setupRegPickers() {
 }
 function updateRegPreview() {
   const el = $('#avatar-preview');
-  el.textContent = regAvatar;
+  if (regPhoto) {
+    el.innerHTML = `<img src="${regPhoto}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;">`;
+  } else {
+    el.textContent = regAvatar;
+  }
   el.style.background = `linear-gradient(135deg, ${regColor}, ${shade(regColor, -30)})`;
 }
 
@@ -490,20 +591,24 @@ function openProfile() {
   if (!state.userId) return;
   profAvatar = state.avatar || AVATARS[0];
   profColor  = state.color  || COLORS[0];
+  profPhoto  = state.photo  || null;
   const upd = () => {
     const el = $('#profile-preview');
-    el.textContent = profAvatar;
+    if (profPhoto) el.innerHTML = `<img src="${profPhoto}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;">`;
+    else el.textContent = profAvatar;
     el.style.background = `linear-gradient(135deg, ${profColor}, ${shade(profColor, -30)})`;
   };
-  buildEmojiGrid($('#profile-emoji'), () => profAvatar, em => { profAvatar = em; upd(); });
+  buildEmojiGrid($('#profile-emoji'), () => profAvatar, em => { profAvatar = em; profPhoto = null; upd(); });
   buildColorGrid($('#profile-color'), () => profColor,  col => { profColor = col; upd(); });
   upd();
   $('#profile-backdrop').hidden = false;
 }
+
 async function saveProfile() {
   state.avatar = profAvatar;
   state.color = profColor;
-  await db.ref('users/' + state.userId).update({ avatar: profAvatar, color: profColor });
+  state.photo = profPhoto;
+  await db.ref('users/' + state.userId).update({ avatar: profAvatar, color: profColor, photo: profPhoto });
   $('#profile-backdrop').hidden = true;
 }
 
@@ -533,15 +638,19 @@ async function doAuth() {
       });
       state.avatar = regAvatar; state.color = regColor;
       loginLocal(userId, nick);
-    } else {
+} else {
       if (!found) { err.textContent = 'Аккаунт не найден — зарегистрируйся'; return; }
       const [uid, u] = found;
+      
       if (!u.pin) {
-        // Легаси-аккаунт без PIN (создан до ввода PIN) — привязываем PIN при первом входе
-        await db.ref('users/' + uid + '/pin').set(hashPin(pin));
+        // Запрещаем захват старых аккаунтов без пароля
+        err.textContent = 'Аккаунт устарел (без PIN). Зарегистрируйте новый.';
+        return;
       } else if (u.pin !== hashPin(pin)) {
-        err.textContent = 'Неверный PIN-код'; return;
+        err.textContent = 'Неверный PIN-код'; 
+        return;
       }
+
       // Аватар/цвет: берём из аккаунта, легаси без них — авто-назначаем
       state.avatar = u.avatar || avatarFromString(uid);
       state.color  = u.color  || colorFromString(u.nickname);
@@ -850,29 +959,44 @@ function renderLobby(m) {
 
 async function startMatch() {
   const mid = state.currentMatchId;
-  const snap = await db.ref('matches/' + mid).get();
-  const m = snap.val();
-  if (!m) return;
+  let waitingUids = [];
 
-  const joined = Object.entries(m.players)
-    .filter(([, p]) => p.status === 'joined')
-    .sort((a, b) => (a[1].joinedAt || 0) - (b[1].joinedAt || 0));
-  const turnOrder = joined.map(([uid]) => uid);
+  const res = await db.ref('matches/' + mid).transaction(m => {
+    // Если матча нет или он уже не в лобби — отменяем транзакцию
+    if (!m || m.status !== 'lobby') return m;
 
-  const updates = {
-    ['matches/' + mid + '/status']: 'active',
-    ['matches/' + mid + '/turnOrder']: turnOrder,
-    ['matches/' + mid + '/currentTurnIndex']: 0
-  };
-  Object.entries(m.players).forEach(([uid, p]) => {
-    if (p.status === 'waiting') {
-      updates['invites/' + uid + '/' + mid] = null;
-      updates['matches/' + mid + '/players/' + uid + '/status'] = 'declined';
-    }
+    // Собираем тех, кто успел присоединиться на момент выполнения транзакции
+    const joined = Object.entries(m.players || {})
+      .filter(([, p]) => p.status === 'joined')
+      .sort((a, b) => (a[1].joinedAt || 0) - (b[1].joinedAt || 0));
+    
+    m.turnOrder = joined.map(([uid]) => uid);
+    m.currentTurnIndex = 0;
+    m.status = 'active';
+
+    // Отклоняем тех, кто всё ещё "в ожидании"
+    waitingUids = []; // очищаем массив на случай повторного запуска транзакции
+    Object.entries(m.players || {}).forEach(([uid, p]) => {
+      if (p.status === 'waiting') {
+        p.status = 'declined';
+        waitingUids.push(uid);
+      }
+    });
+
+    return m;
   });
-  await db.ref().update(updates);
 
-  db.ref('matches/' + mid + '/events').push({ time: Date.now(), userId: '', action: 'start', text: '🏀 Матч начался!' });
+  // Если транзакция прошла успешно, убираем приглашения у "опоздавших" и пишем событие
+  if (res.committed && res.snapshot.exists()) {
+    if (waitingUids.length > 0) {
+      const updates = {};
+      waitingUids.forEach(uid => {
+        updates['invites/' + uid + '/' + mid] = null;
+      });
+      db.ref().update(updates);
+    }
+    db.ref('matches/' + mid + '/events').push({ time: Date.now(), userId: '', action: 'start', text: '🏀 Матч начался!' });
+  }
 }
 
 // Выход из ЛОББИ (до старта): создатель отменяет матч, остальные — просто уходят.
@@ -946,12 +1070,32 @@ function renderMatch(m) {
   });
 
   // Анимация нового события (у всех клиентов)
+// Анимация нового события (у всех клиентов)
+// Анимация и рендер нового события (у всех клиентов)
   const events = m.events ? Object.values(m.events) : [];
-  events.sort((a, b) => (b.time || 0) - (a.time || 0));
-  const newest = events[0];
+  
+  // 1. Сортируем от старых к новым (новые будут появляться внизу)
+  events.sort((a, b) => (a.time || 0) - (b.time || 0));
+  
+  // Отрисовка ленты событий
+  const feed = $('#match-events-feed');
+  if (feed) {
+    feed.innerHTML = '';
+    events.forEach(ev => {
+      const el = document.createElement('div');
+      el.className = 'event-item ' + ev.action;
+      el.textContent = ev.text;
+      feed.appendChild(el);
+    });
+    
+    // 2. АВТОСКРОЛЛ в самый низ к новому событию
+    feed.scrollTop = feed.scrollHeight;
+  }
+
+  // 3. Самое новое событие теперь находится в конце массива
+  const newest = events[events.length - 1];
   if (newest && lastEventTime !== null && newest.time > lastEventTime) triggerShotFeedback(newest);
   if (newest) lastEventTime = Math.max(lastEventTime || 0, newest.time || 0);
-
   // Кнопки броска — только активному игроку
   const me = m.players[state.userId];
   const canShoot = isMyTurn && me && !me.finished && !me.left;
@@ -961,39 +1105,50 @@ function renderMatch(m) {
 }
 
 /* Записать бросок — в транзакции (защита от гонок) */
+/* Записать бросок — в транзакции (защита от гонок) */
+/* Записать бросок — в транзакции (защита от гонок) */
 function recordShot(result) {
   const mid = state.currentMatchId;
   const ref = db.ref('matches/' + mid);
-  const k1 = db.ref('matches/' + mid + '/events').push().key;
-  const k2 = db.ref('matches/' + mid + '/events').push().key;
   const now = Date.now();
 
   ref.transaction(m => {
     if (!m || m.status !== 'active') return m;
+    
+    // 1. Проверяем, что нажимает именно СОЗДАТЕЛЬ матча
+    if (m.creatorId !== state.userId) return; 
+
+    // 2. Узнаем, чей сейчас ход (кому записываем очки)
     const order = m.turnOrder || [];
-    if (order[m.currentTurnIndex] !== state.userId) return; // не мой ход — отмена
-    const p = m.players[state.userId];
+    const activeUid = order[m.currentTurnIndex];
+    const p = m.players[activeUid];
+    
     if (!p || p.finished || p.left) return;
     if (!m.events) m.events = {};
 
     let advance = false;
+    const k1 = db.ref().push().key; 
+
     if (result === 'hit') {
       p.hits = (p.hits || 0) + 1;
       p.streak = (p.streak || 0) + 1;
-      m.events[k1] = { time: now, userId: state.userId, action: 'hit',
+      m.events[k1] = { time: now, userId: activeUid, action: 'hit',
         text: `${p.nickname} попал${p.streak > 1 ? ' — ' + p.streak + ' подряд' : ''}` };
+      
       if (m.goalType === 'common' && m.targetHits && p.hits >= m.targetHits) {
         p.finished = true;
         const finishedCount = Object.values(m.players).filter(x => x.finished).length;
         p.place = finishedCount;
-        m.events[k2] = { time: now + 1, userId: state.userId, action: 'finish',
+        
+        const k2 = db.ref().push().key; 
+        m.events[k2] = { time: now + 1, userId: activeUid, action: 'finish',
           text: `🏁 ${p.nickname} достиг цели — место #${finishedCount}` };
         advance = true;
       }
     } else {
       p.misses = (p.misses || 0) + 1;
       p.streak = 0;
-      m.events[k1] = { time: now, userId: state.userId, action: 'miss', text: `${p.nickname} промахнулся` };
+      m.events[k1] = { time: now, userId: activeUid, action: 'miss', text: `${p.nickname} промахнулся` };
       advance = true;
     }
 
@@ -1024,20 +1179,44 @@ function winnerByPlace(m) {
 }
 
 // Победитель: место #1, иначе лучший счёт среди участников
+// Победитель: место #1, иначе лучший счёт среди участников
 function computeWinner(m) {
   const byPlace = winnerByPlace(m);
   if (byPlace) return byPlace;
+  
   const order = m.turnOrder || Object.keys(m.players);
   let best = null;
+  let isTie = false; // Флаг для отслеживания ничьей
+
   order.forEach(uid => {
     const p = m.players[uid];
-    if (!p) return;
-    if (!best) { best = uid; return; }
+    // Пропускаем несуществующих игроков и тех, кто вышел (p.left)
+    if (!p || p.left) return;
+
+    if (!best) { 
+      best = uid; 
+      isTie = false;
+      return; 
+    }
+    
     const bp = m.players[best];
-    if ((p.hits || 0) > (bp.hits || 0) ||
-        ((p.hits || 0) === (bp.hits || 0) && (p.misses || 0) < (bp.misses || 0))) best = uid;
+    const pHits = p.hits || 0;
+    const pMiss = p.misses || 0;
+    const bpHits = bp.hits || 0;
+    const bpMiss = bp.misses || 0;
+
+    if (pHits > bpHits || (pHits === bpHits && pMiss < bpMiss)) {
+      // Найден новый лидер
+      best = uid;
+      isTie = false;
+    } else if (pHits === bpHits && pMiss === bpMiss) {
+      // Показатели абсолютно равны — фиксируем ничью
+      isTie = true;
+    }
   });
-  return best;
+
+  // Если ничья, возвращаем null (это включит баннер "Ничья" на экране результатов)
+  return isTie ? null : best;
 }
 
 /* Завершить матч вручную (создатель) */
@@ -1202,8 +1381,11 @@ function writeHistory(mid, uid, m) {
 }
 
 function finalizeAll(m) {
-  const order = m.turnOrder || [];
-  order.forEach(uid => { if (m.players[uid]) finalizePlayer(state.currentMatchId, uid, m); });
+  // Каждый клиент обновляет только свою собственную статистику и историю.
+  // Это предотвращает ошибки записи в чужие узлы БД.
+  if (m.players && m.players[state.userId]) {
+    finalizePlayer(state.currentMatchId, state.userId, m);
+  }
 }
 
 /* ================================================================
@@ -1258,4 +1440,4 @@ function renderHistory(obj) {
       <div class="hc-players">${players}</div>`;
     list.appendChild(card);
   });
-}
+  };
