@@ -63,6 +63,7 @@
           </div>
         </div>
         <div class="topbar-actions">
+          <button id="mymatches-btn" class="btn-icon ghost" title="Мои матчи">🎮</button>
           <button id="history-btn" class="btn-icon ghost" title="История матчей">🕘</button>
           <button id="sound-btn" class="btn-icon ghost" title="Звук вкл/выкл">🔊</button>
           <button id="logout-btn" class="btn-icon ghost" title="Выйти из аккаунта">⎋</button>
@@ -150,6 +151,24 @@
             </div>
           </div>
 
+          <div class="settings-group">
+            <label class="settings-label">Кто отмечает броски</label>
+            <div class="segment" id="seg-scorer">
+              <button type="button" class="seg-btn active" data-scorer="shooter">Кто бросает</button>
+              <button type="button" class="seg-btn" data-scorer="creator">Только создатель</button>
+            </div>
+          </div>
+
+          <div class="settings-group">
+            <label class="settings-label">Таймер на ход</label>
+            <div class="segment" id="seg-timer">
+              <button type="button" class="seg-btn active" data-secs="0">Выкл</button>
+              <button type="button" class="seg-btn" data-secs="15">15с</button>
+              <button type="button" class="seg-btn" data-secs="30">30с</button>
+              <button type="button" class="seg-btn" data-secs="60">60с</button>
+            </div>
+          </div>
+
           <div class="wizard-nav">
             <button class="btn btn-ghost" data-goto="1">‹ Назад</button>
             <button class="btn btn-accent" data-goto="3">Далее ›</button>
@@ -158,7 +177,14 @@
 
         <!-- Шаг 3: выбор игроков -->
         <div class="wstep" data-wstep="3">
-          <h2 class="section-title">Кого позвать</h2>
+          <h2 class="section-title">Название матча</h2>
+          <input id="match-name" class="field" type="text" placeholder="Например: Вечерний баскет" maxlength="24" autocomplete="off" />
+          <h2 class="section-title" style="margin-top:20px">Когда начинать <span class="opt">— по умолчанию сразу</span></h2>
+          <div class="dt-row">
+            <input id="match-date" class="field" type="date" autocomplete="off" />
+            <input id="match-time" class="field" type="time" autocomplete="off" />
+          </div>
+          <h2 class="section-title" style="margin-top:20px">Кого позвать</h2>
           <input id="user-search" class="field search-input" type="text" placeholder="🔍  Поиск по нику..." autocomplete="off" />
           <div id="user-list" class="user-list"></div>
           <div class="wizard-nav">
@@ -201,6 +227,11 @@
 
       <div class="turnline" id="match-turn">—</div>
 
+      <div class="turn-timer" id="turn-timer" hidden>
+        <div class="turn-timer-track"><div class="turn-timer-bar" id="turn-timer-bar"></div></div>
+        <div class="turn-timer-num" id="turn-timer-num">0</div>
+      </div>
+
       <div class="board">
         <div class="board-title" id="match-target">ТАБЛО</div>
         <div class="thead"><span class="r">TOP</span><span>ИГРОК</span><span class="r">ПОПАЛ</span><span class="r">СЕРИЯ</span></div>
@@ -238,7 +269,7 @@
     <section id="screen-results" class="screen">
       <div id="confetti" class="confetti"></div>
       <header class="topbar">
-        <div class="topbar-title">Итоги матча</div>
+        <div class="topbar-title" id="results-title">Итоги матча</div>
       </header>
       <main class="menu-body">
         <div id="results-winner" class="winner-banner"></div>
@@ -265,6 +296,38 @@
       </main>
     </section>
 
+    <!-- ============ ЭКРАН 8: МОИ МАТЧИ ============ -->
+    <section id="screen-mymatches" class="screen">
+      <header class="topbar">
+        <button class="btn-icon ghost" data-nav="menu">‹</button>
+        <div class="topbar-title">Мои матчи</div>
+        <div class="topbar-spacer"></div>
+      </header>
+      <main class="menu-body">
+        <div id="mymatches-list" class="history-list"></div>
+        <div id="mymatches-empty" class="empty">
+          <div class="empty-emoji">🗂️</div>
+          <div>Нет активных матчей</div>
+        </div>
+      </main>
+    </section>
+
+  </div>
+
+  <!-- ============ МОДАЛКА РЕДАКТИРОВАНИЯ МАТЧА ============ -->
+  <div id="edit-backdrop" class="modal-backdrop" hidden>
+    <div class="modal">
+      <div class="modal-text">Изменить матч</div>
+      <input id="edit-name" class="field" type="text" placeholder="Название матча" maxlength="24" autocomplete="off" />
+      <div class="dt-row" style="margin-top:10px">
+        <input id="edit-date" class="field" type="date" autocomplete="off" />
+        <input id="edit-time" class="field" type="time" autocomplete="off" />
+      </div>
+      <div class="modal-actions" style="margin-top:18px">
+        <button id="edit-cancel" class="btn btn-ghost">Отмена</button>
+        <button id="edit-save" class="btn btn-accent">Сохранить</button>
+      </div>
+    </div>
   </div>
 
   <!-- ============ МОДАЛКА (замена confirm/alert) ============ -->
@@ -296,6 +359,17 @@
       <div class="modal-actions">
         <button id="profile-cancel" class="btn btn-ghost">Отмена</button>
         <button id="profile-save" class="btn btn-accent">Сохранить</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ МОДАЛКА «ХОД МАТЧА» (полный лог из истории) ============ -->
+  <div id="log-backdrop" class="modal-backdrop" hidden>
+    <div class="modal log-modal">
+      <div class="modal-text">Ход матча</div>
+      <div class="events-feed log-feed" id="log-feed"></div>
+      <div class="modal-actions">
+        <button id="log-close" class="btn btn-accent">Закрыть</button>
       </div>
     </div>
   </div>

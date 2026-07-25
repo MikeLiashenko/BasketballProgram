@@ -128,6 +128,12 @@ b { font-weight: 700; }
   transition: border-color .2s, box-shadow .2s, background .2s;
 }
 .field::placeholder { color: var(--faint); }
+.dt-row { display: flex; gap: 10px; }
+.dt-row .field { flex: 1; min-width: 0; }
+input[type="date"], input[type="time"] { color-scheme: dark; font-family: var(--font); cursor: text; }
+input[type="date"]::-webkit-calendar-picker-indicator,
+input[type="time"]::-webkit-calendar-picker-indicator { filter: invert(.7); cursor: pointer; }
+.section-title .opt { text-transform: none; letter-spacing: 0; color: var(--faint); font-weight: 500; }
 .field:focus { border-color: rgba(255,122,69,.5); box-shadow: 0 0 0 4px var(--accent-soft); background: rgba(0,0,0,.28); }
 
 /* ============ ЭКРАН ВХОДА ============ */
@@ -260,6 +266,24 @@ b { font-weight: 700; }
 .check { width: 24px; height: 24px; border-radius: 8px; border: 1.5px solid var(--hairline-2); display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 700; color: transparent; transition: all .18s; }
 .user-row.selected .check { background: var(--accent); border-color: var(--accent); color: #26120a; }
 
+/* ============ НАСТРОЙКИ МАТЧА (сегменты) ============ */
+.settings-group { margin-top: 16px; }
+.settings-label { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .14em; color: var(--faint); font-weight: 600; margin-bottom: 9px; }
+.segment { display: flex; gap: 6px; background: rgba(0,0,0,.28); border: 1px solid var(--hairline); border-radius: 14px; padding: 4px; }
+.seg-btn { flex: 1; border: none; background: transparent; color: var(--muted); font-family: var(--font); font-weight: 600; font-size: 13.5px;
+  padding: 10px 4px; border-radius: 10px; cursor: pointer; transition: color .2s, background .2s, box-shadow .2s; }
+.seg-btn:hover { color: var(--text); }
+.seg-btn.active { color: #26120a; background: linear-gradient(180deg, var(--accent-2), var(--accent)); box-shadow: 0 6px 16px rgba(255,122,69,.28), inset 0 1px 0 rgba(255,255,255,.28); }
+
+/* ============ ТАЙМЕР НА ХОД ============ */
+#screen-match .turn-timer { position: relative; z-index: 3; display: flex; align-items: center; gap: 10px; margin: 0 22px 12px; flex: none; }
+#screen-match .turn-timer-track { flex: 1; height: 6px; border-radius: 6px; background: rgba(255,255,255,.1); overflow: hidden; box-shadow: inset 0 1px 2px rgba(0,0,0,.35); }
+#screen-match .turn-timer-bar { height: 100%; width: 100%; border-radius: 6px; background: linear-gradient(90deg, var(--cyan), var(--cyan-2)); box-shadow: 0 0 12px rgba(108,201,255,.5); transition: width .2s linear, background .3s; }
+#screen-match .turn-timer-num { min-width: 26px; text-align: right; font-size: 15px; font-weight: 800; color: var(--cyan-2); font-variant-numeric: tabular-nums; }
+#screen-match .turn-timer.low .turn-timer-bar { background: linear-gradient(90deg, #ff7a45, #fb7185); box-shadow: 0 0 14px rgba(251,113,133,.6); }
+#screen-match .turn-timer.low .turn-timer-num { color: var(--red); animation: timerPulse .6s ease-in-out infinite; }
+@keyframes timerPulse { 0%,100% { opacity: 1; } 50% { opacity: .5; } }
+
 /* ============ ЛОББИ ============ */
 .lobby-info { margin-bottom: 16px; font-size: 13.5px; color: var(--text); font-weight: 500;
   background: var(--accent-soft); border: 1px solid rgba(255,122,69,.28); padding: 13px 15px; border-radius: 14px; }
@@ -313,6 +337,7 @@ b { font-weight: 700; }
 .event-item.finish { border-left-color: var(--gold); color: var(--gold); }
 .event-item.start  { border-left-color: var(--accent); color: var(--accent-2); }
 .event-item.leave  { border-left-color: var(--faint); color: var(--muted); }
+.event-item.join   { border-left-color: var(--cyan); color: var(--cyan-2); }
 .match-foot { padding: 16px 18px 22px; border-top: 1px solid var(--hairline); display: flex; flex-direction: column; gap: 12px; position: relative; z-index: 1; }
 .shot-buttons { display: flex; gap: 12px; }
 .btn-hit  { flex: 1; padding: 21px; font-size: 18px; border-radius: 18px; border: none; color: #06280f;
@@ -374,6 +399,26 @@ b { font-weight: 700; }
 .modal-actions { display: flex; gap: 10px; }
 .modal-actions .btn { flex: 1; }
 
+/* ============ МОДАЛКА «ХОД МАТЧА» ============ */
+.log-modal { max-width: 400px; }
+.log-feed { max-height: 52vh; overflow-y: auto; text-align: left; margin: 6px 0 20px;
+  display: flex; flex-direction: column; gap: 8px; padding-right: 4px; }
+.hc-log-btn { margin-top: 12px; width: 100%; padding: 10px; font-family: var(--font); font-size: 13px; font-weight: 600;
+  color: var(--cyan-2); background: rgba(108,201,255,.1); border: 1px solid rgba(108,201,255,.28);
+  border-radius: 12px; cursor: pointer; transition: background .18s, border-color .18s; }
+.hc-log-btn:hover { background: rgba(108,201,255,.18); border-color: rgba(108,201,255,.45); }
+.hc-log-btn:active { transform: scale(.98); }
+
+/* ============ МОИ МАТЧИ ============ */
+.mm-badges { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.mm-badge { font-size: 10px; padding: 4px 9px; border-radius: 20px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; white-space: nowrap; }
+.mm-badge.lobby   { background: rgba(255,211,107,.14); color: var(--gold); }
+.mm-badge.live    { background: rgba(74,222,128,.14); color: var(--green); }
+.mm-badge.left    { background: var(--glass-2); color: var(--muted); }
+.mm-badge.creator { background: rgba(165,160,255,.14); color: var(--violet); }
+.mm-actions { display: flex; gap: 8px; margin-top: 12px; }
+.mm-btn { flex: 1; padding: 11px; font-size: 13.5px; }
+
 /* ============ ИСТОРИЯ ============ */
 .history-list { display: flex; flex-direction: column; gap: 12px; }
 .history-card { background: var(--glass); border: 1px solid var(--hairline); border-radius: var(--radius);
@@ -387,6 +432,7 @@ b { font-weight: 700; }
 .history-card.win .hc-result  { color: var(--gold); }
 .history-card.left .hc-result { color: var(--muted); }
 .hc-date { font-size: 11.5px; color: var(--faint); white-space: nowrap; }
+.hc-name { font-size: 14px; font-weight: 700; letter-spacing: -0.01em; margin-bottom: 6px; }
 .hc-mode { font-size: 12.5px; color: var(--muted); font-weight: 500; margin-bottom: 11px; }
 .hc-players { display: flex; flex-direction: column; gap: 6px; }
 .hc-player { display: flex; align-items: center; gap: 9px; font-size: 13px; padding: 7px 11px; background: rgba(0,0,0,.2); border-radius: 11px; }
@@ -420,7 +466,7 @@ b { font-weight: 700; }
 #screen-match .turnline.my { color: var(--green); }
 
 #screen-match .board { position: relative; z-index: 3; margin: 0 16px 16px; background: var(--card2); border: 1px solid var(--hairline); border-radius: 22px; box-shadow: 0 20px 50px rgba(0,0,0,.4), inset 0 1px 0 rgba(255,255,255,.05); padding: 6px 6px; flex: none; max-height: 45vh; display: flex; flex-direction: column; overflow: hidden; }
-#screen-match .board-title { text-align: center; font-size: 12.5px; font-weight: 800; letter-spacing: .22em; padding: 11px 0 12px; background: linear-gradient(180deg,#c9ecff,#5cb4ff); -webkit-background-clip: text; background-clip: text; color: transparent; filter: drop-shadow(0 0 12px rgba(108,201,255,.45)); }
+#screen-match .board-title { text-align: center; font-size: 12.5px; font-weight: 800; letter-spacing: .22em; padding: 11px 14px 12px; background: linear-gradient(180deg,#c9ecff,#5cb4ff); -webkit-background-clip: text; background-clip: text; color: transparent; filter: drop-shadow(0 0 12px rgba(108,201,255,.45)); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #screen-match .thead, #screen-match .trow { display: grid; grid-template-columns: 42px 1fr 68px 68px; align-items: center; }
 #screen-match .thead { padding: 0 14px 8px; border-bottom: 1px solid var(--hairline); font-size: 10px; letter-spacing: .16em; text-transform: uppercase; color: rgba(190,205,225,.5); font-weight: 700; }
 #screen-match .thead .r { text-align: center; }

@@ -12,6 +12,14 @@ firebase.initializeApp(firebaseConfig);
 const db = firebase.database();
 const TS = firebase.database.ServerValue.TIMESTAMP;
 
+// Смещение серверных часов — чтобы таймер хода был одинаковым у всех клиентов
+let serverOffset = 0;
+db.ref('.info/serverTimeOffset').on('value', s => { serverOffset = s.val() || 0; });
+function serverNow() { return Date.now() + serverOffset; }
+
+// Состояние клиентского таймера хода
+const timerState = { startedAt: null, intervalId: null, firedAt: null };
+
 /* ---------- Глобальное состояние ---------- */
 const state = {
   userId: null,
@@ -33,6 +41,9 @@ let confettiFor = null;   // matchId, для которого уже запущ�
 let modalResolve = null;  // резолвер кастомной модалки
 let prevMatchStatus = null; // для свистка на старте матча
 let prevInviteCount = 0;    // для звука нового приглашения
+let lobbyMatch = null;      // последнее состояние матча в лобби (для отсчёта до старта)
+let lobbyIntervalId = null; // тик обратного отсчёта в лобби
+let editingMatchId = null;  // id матча, открытого в модалке редактирования
 
 /* ================================================================
    УТИЛИТЫ
@@ -336,6 +347,21 @@ function formatDate(ts) {
   const p = n => String(n).padStart(2, '0');
   return `${d.getDate()} ${MONTHS[d.getMonth()]}, ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
+// Время суток HH:MM
+function fmtClock(ts) {
+  const d = new Date(ts);
+  const p = n => String(n).padStart(2, '0');
+  return `${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+// Обратный отсчёт: «45с», «12:30», «2ч 5м»
+function fmtCountdown(sec) {
+  sec = Math.max(0, sec);
+  if (sec < 60) return sec + 'с';
+  const m = Math.floor(sec / 60), s = sec % 60;
+  if (m < 60) return `${m}:${String(s).padStart(2, '0')}`;
+  const h = Math.floor(m / 60);
+  return `${h}ч ${m % 60}м`;
+}
 
 /* ================================================================
    ИНИЦИАЛИЗАЦИЯ
@@ -370,6 +396,7 @@ async function resumeUser() {
   const u = snap.val();
   state.avatar = u.avatar || avatarFromString(state.userId);
   state.color  = u.color  || colorFromString(u.nickname || state.nickname);
+  state.photo  = u.photo || null;
   if (!u.avatar || !u.color) db.ref('users/' + state.userId).update({ avatar: state.avatar, color: state.color });
   setupPresence();
 }
@@ -410,6 +437,7 @@ function bindEvents() {
   $('#create-btn').addEventListener('click', openWizard);
   $('#logout-btn').addEventListener('click', logout);
   $('#history-btn').addEventListener('click', openHistory);
+  $('#mymatches-btn').addEventListener('click', openMyMatches);
   $('#sound-btn').addEventListener('click', toggleSound);
 
   // --- Звук клика на любых кнопках (везде) ---
@@ -422,74 +450,42 @@ function bindEvents() {
   $$('[data-nav="menu"]').forEach(b => b.addEventListener('click', goMenu));
 
   // --- Мастер: переходы между шагами ---
-// --- Мастер: переходы между шагами ---
-// --- Мастер: переходы между шагами ---
-// --- Мастер: переходы между шагами ---
-// Кнопки броска — только СОЗДАТЕЛЮ матча (он судит)
-  const activePlayer = m.players[activeId];
-  const canCreatorShoot = isCreator && activePlayer && !activePlayer.finished && !activePlayer.left;
-  
-  $('#btn-hit').disabled = !canCreatorShoot;
-  $('#btn-miss').disabled = !canCreatorShoot;
-  $('#finish-btn').hidden = !isCreator;   // ⏹ Завершить — только создателю; ⏸ Выйти — всем
-}
+  $$('[data-goto]').forEach(b => b.addEventListener('click', () => {
+    const target = +b.dataset.goto;
+    // Блокируем только переход на шаг 3 (выбор игроков), если цель еще не выбрана на шаге 2
+    if (target === 3 && !state.wizard.goalType) { 
+      flash(b, 'Выбери цель'); 
+      return; 
+    }
+    goToStep(target);
+  }));
 
   // --- Загрузка фото (регистрация и профиль) ---
-  $('#reg-photo-btn').addEventListener('click', () => $('#reg-photo-file').click());
-  $('#reg-photo-file').addEventListener('change', e => {
-    compressImage(e.target.files[0], base64 => { 
-      regPhoto = base64; 
-      updateRegPreview(); 
-    });
-  });
-
-  $('#prof-photo-btn').addEventListener('click', () => $('#prof-photo-file').click());
-  $('#prof-photo-file').addEventListener('change', e => {
-    compressImage(e.target.files[0], base64 => { 
-      profPhoto = base64; 
-      $('#profile-preview').innerHTML = `<img src="${base64}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;">`; 
-    });
-  });
-
-  // --- Загрузка фото (регистрация и профиль) ---
-  $('#reg-photo-btn').addEventListener('click', () => $('#reg-photo-file').click());
-  $('#reg-photo-file').addEventListener('change', e => {
-    compressImage(e.target.files[0], base64 => { 
-      regPhoto = base64; 
-      updateRegPreview(); 
-    });
-  });
-
-  $('#prof-photo-btn').addEventListener('click', () => $('#prof-photo-file').click());
-  $('#prof-photo-file').addEventListener('change', e => {
-    compressImage(e.target.files[0], base64 => { 
-      profPhoto = base64; 
-      $('#profile-preview').innerHTML = `<img src="${base64}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;">`; 
-    });
-  });
-
-  $('#prof-photo-btn').addEventListener('click', () => $('#prof-photo-file').click());
-  $('#prof-photo-file').addEventListener('change', e => {
-    compressImage(e.target.files[0], base64 => { 
-      profPhoto = base64; 
-      $('#profile-preview').innerHTML = `<img src="${base64}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;">`; 
-    });
-  });
-  $('#reg-photo-file').addEventListener('change', e => {
-    compressImage(e.target.files[0], base64 => { 
-      regPhoto = base64; 
-      updateRegPreview(); 
-    });
-  });
-
-  $('#prof-photo-btn').addEventListener('click', () => $('#prof-photo-file').click());
-  $('#prof-photo-file').addEventListener('change', e => {
-    compressImage(e.target.files[0], base64 => { 
-      profPhoto = base64; 
-      $('#profile-preview').innerHTML = `<img src="${base64}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;">`; 
-    });
-  });
+  const regBtn = $('#reg-photo-btn');
+  if (regBtn) regBtn.addEventListener('click', () => $('#reg-photo-file').click());
   
+  const regFile = $('#reg-photo-file');
+  if (regFile) {
+    regFile.addEventListener('change', e => {
+      compressImage(e.target.files[0], base64 => { 
+        regPhoto = base64; 
+        updateRegPreview(); 
+      });
+    });
+  }
+
+  const profBtn = $('#prof-photo-btn');
+  if (profBtn) profBtn.addEventListener('click', () => $('#prof-photo-file').click());
+  
+  const profFile = $('#prof-photo-file');
+  if (profFile) {
+    profFile.addEventListener('change', e => {
+      compressImage(e.target.files[0], base64 => { 
+        profPhoto = base64; 
+        $('#profile-preview').innerHTML = `<img src="${base64}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;">`; 
+      });
+    });
+  }
 
   // --- Шаг 2: выбор цели ---
   $$('[data-goal]').forEach(card => card.addEventListener('click', () => {
@@ -506,16 +502,32 @@ function bindEvents() {
     v = Math.max(1, Math.min(99, v));
     inp.value = v; state.wizard.targetHits = v;
   }));
-$('#target-input').addEventListener('input', e => {
-    const val = parseInt(e.target.value, 10);
-    // Обновляем стейт только если введено реальное число
-    if (!isNaN(val)) state.wizard.targetHits = Math.max(1, Math.min(99, val));
-  });
   
-  // Возвращаем корректное значение в поле, если юзер стер всё и кликнул в другое место
-  $('#target-input').addEventListener('blur', e => {
-    e.target.value = state.wizard.targetHits;
-  });
+  const targetInput = $('#target-input');
+  if (targetInput) {
+    targetInput.addEventListener('input', e => {
+      const val = parseInt(e.target.value, 10);
+      // Обновляем стейт только если введено реальное число
+      if (!isNaN(val)) state.wizard.targetHits = Math.max(1, Math.min(99, val));
+    });
+    
+    // Возвращаем корректное значение в поле, если юзер стер всё и кликнул в другое место
+    targetInput.addEventListener('blur', e => {
+      e.target.value = state.wizard.targetHits;
+    });
+  }
+
+  // --- Шаг 2: кто отмечает броски / таймер на ход ---
+  $$('#seg-scorer .seg-btn').forEach(b => b.addEventListener('click', () => {
+    $$('#seg-scorer .seg-btn').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    state.wizard.scorer = b.dataset.scorer;
+  }));
+  $$('#seg-timer .seg-btn').forEach(b => b.addEventListener('click', () => {
+    $$('#seg-timer .seg-btn').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    state.wizard.turnSeconds = +b.dataset.secs;
+  }));
 
   // --- Шаг 3: поиск / отправка ---
   $('#user-search').addEventListener('input', renderUserList);
@@ -545,7 +557,34 @@ $('#target-input').addEventListener('input', e => {
   $('#profile-cancel').addEventListener('click', () => { $('#profile-backdrop').hidden = true; });
   $('#profile-backdrop').addEventListener('click', e => { if (e.target.id === 'profile-backdrop') $('#profile-backdrop').hidden = true; });
 
+  // --- Модалка «Ход матча» (полный лог из истории) ---
+  $('#log-close').addEventListener('click', () => { $('#log-backdrop').hidden = true; });
+  $('#log-backdrop').addEventListener('click', e => { if (e.target.id === 'log-backdrop') $('#log-backdrop').hidden = true; });
 
+  // --- Модалка редактирования матча ---
+  $('#edit-save').addEventListener('click', saveEditMatch);
+  $('#edit-cancel').addEventListener('click', () => { $('#edit-backdrop').hidden = true; editingMatchId = null; });
+  $('#edit-backdrop').addEventListener('click', e => { if (e.target.id === 'edit-backdrop') { $('#edit-backdrop').hidden = true; editingMatchId = null; } });
+}
+
+/* Открыть полный лог хода матча (из карточки истории) */
+function openMatchLog(events) {
+  const feed = $('#log-feed');
+  feed.innerHTML = '';
+  const list = (events || []).slice().sort((a, b) => (a.time || 0) - (b.time || 0));
+  if (!list.length) {
+    feed.innerHTML = '<div class="empty" style="padding:24px 0">Событий не записано</div>';
+  } else {
+    list.forEach(ev => {
+      const el = document.createElement('div');
+      el.className = 'event-item ' + (ev.action || '');
+      el.textContent = ev.text || '';
+      feed.appendChild(el);
+    });
+  }
+  $('#log-backdrop').hidden = false;
+  feed.scrollTop = 0;
+}
 
 function flash(el, msg) {
   const old = el.textContent;
@@ -633,10 +672,10 @@ async function doAuth() {
       const userId = uuid();
       await db.ref('users/' + userId).set({
         nickname: nick, pin: hashPin(pin), online: true,
-        avatar: regAvatar, color: regColor,
+        avatar: regAvatar, color: regColor, photo: regPhoto || null,
         stats: { matches: 0, hits: 0, misses: 0 }
       });
-      state.avatar = regAvatar; state.color = regColor;
+      state.avatar = regAvatar; state.color = regColor; state.photo = regPhoto || null;
       loginLocal(userId, nick);
 } else {
       if (!found) { err.textContent = 'Аккаунт не найден — зарегистрируйся'; return; }
@@ -654,6 +693,7 @@ async function doAuth() {
       // Аватар/цвет: берём из аккаунта, легаси без них — авто-назначаем
       state.avatar = u.avatar || avatarFromString(uid);
       state.color  = u.color  || colorFromString(u.nickname);
+      state.photo  = u.photo || null;
       if (!u.avatar || !u.color) db.ref('users/' + uid).update({ avatar: state.avatar, color: state.color });
       loginLocal(uid, u.nickname);
     }
@@ -704,6 +744,8 @@ function toggleSound() {
    ================================================================ */
 function goMenu() {
   stopMatchWatch();
+  stopTurnTimer();
+  stopLobbyTimer();
   state.currentMatchId = null;
   localStorage.removeItem('bb_activeMatch');
   prevInviteCount = -1; // сброс базовой линии, чтобы не пикать на первом снимке
@@ -728,7 +770,7 @@ function renderHeader(u) {
   if (!u) return;
   $('#menu-nick').textContent = u.nickname || state.nickname;
   const av = $('#menu-avatar');
-  av.textContent = (u.avatar || (u.nickname || '?').charAt(0));
+  av.innerHTML = faceOf(u);
   av.style.background = `linear-gradient(135deg, ${colorOf(u)}, ${shade(colorOf(u), -30)})`;
   const st = u.stats || {};
   $('#menu-stat-matches').textContent = st.matches || 0;
@@ -748,14 +790,14 @@ function renderInvites(obj) {
 
   entries.forEach(([matchId, inv]) => {
     const typeLabel = inv.goalType === 'common' ? 'Общая цель' : 'Обычный матч';
-    const creator = { nickname: inv.creatorNickname, avatar: inv.creatorAvatar, color: inv.creatorColor };
+    const creator = { nickname: inv.creatorNickname, avatar: inv.creatorAvatar, color: inv.creatorColor, photo: inv.creatorPhoto };
     const card = document.createElement('div');
     card.className = 'invite-card';
     card.innerHTML = `
       <div class="avatar" style="${avatarBg(colorOf(creator))}">${faceOf(creator)}</div>
       <div class="info">
-        <div class="who">${escapeHtml(inv.creatorNickname || '—')}</div>
-        <div class="sub">Приглашает в матч · ${typeLabel}</div>
+        <div class="who">${escapeHtml(inv.name || ('Матч ' + (inv.creatorNickname || '')))}</div>
+        <div class="sub">${escapeHtml(inv.creatorNickname || '—')} · ${typeLabel}${inv.startAt ? ' · 🕐 ' + fmtClock(inv.startAt) : ''}</div>
       </div>
       <div class="invite-actions">
         <button class="btn btn-accent accept">Принять</button>
@@ -771,9 +813,44 @@ async function acceptInvite(matchId) {
   const snap = await db.ref('matches/' + matchId).get();
   const m = snap.val();
   await db.ref('invites/' + state.userId + '/' + matchId).remove();
-  if (!m || m.status !== 'lobby') { showAlert('Матч уже начался или отменён', '⚠️'); return; }
-  await db.ref('matches/' + matchId + '/players/' + state.userId)
-    .update({ status: 'joined', joinedAt: TS, avatar: state.avatar || null, color: state.color || null });
+
+  if (!m || m.status === 'finished') { showAlert('Матч уже завершён', '⚠️'); return; }
+
+  if (m.status === 'lobby') {
+    // Обычный вход в лобби
+    await db.ref('matches/' + matchId + '/players/' + state.userId)
+      .update({ status: 'joined', joinedAt: TS, avatar: state.avatar || null, color: state.color || null, photo: state.photo || null });
+    enterMatch(matchId);
+    return;
+  }
+
+  // Матч уже идёт — присоединяемся на ходу (поздний вход)
+  const now = Date.now();
+  await db.ref('matches/' + matchId).transaction(mm => {
+    if (!mm || mm.status !== 'active') return mm;
+    if (!mm.players) mm.players = {};
+    const p = mm.players[state.userId] || {};
+    p.nickname = state.nickname;
+    p.avatar = state.avatar || null;
+    p.color  = state.color  || null;
+    p.photo  = state.photo  || null;
+    p.status = 'joined';
+    p.joinedAt = now;
+    p.left = false;
+    p.finished = false;
+    p.hits = p.hits || 0;
+    p.misses = p.misses || 0;
+    p.streak = 0;
+    mm.players[state.userId] = p;
+
+    mm.turnOrder = mm.turnOrder || [];
+    if (mm.turnOrder.indexOf(state.userId) === -1) mm.turnOrder.push(state.userId);
+
+    if (!mm.events) mm.events = {};
+    const k = db.ref().push().key;
+    mm.events[k] = { time: now, userId: state.userId, action: 'join', text: `${state.nickname} присоединился` };
+    return mm;
+  });
   enterMatch(matchId);
 }
 
@@ -787,11 +864,23 @@ async function declineInvite(matchId) {
    ЭКРАН 3 — МАСТЕР СОЗДАНИЯ
    ================================================================ */
 function openWizard() {
-  state.wizard = { goalType: null, targetHits: 10, selected: {} };
+  state.wizard = { goalType: null, targetHits: 10, scorer: 'shooter', turnSeconds: 0, name: '', selected: {} };
+  // Выбираем визуально "Обычный" тип по умолчанию
+  $('#type-normal').classList.add('selected');
   $$('[data-goal]').forEach(c => c.classList.remove('selected'));
   $('#target-wrap').hidden = true;
   $('#target-input').value = 10;
+  $('#match-name').value = '';
   $('#user-search').value = '';
+  // Предзаполняем дату/время текущими — пустые нативные поля выглядят некрасиво.
+  // Оставленное «сейчас» время окажется в прошлом к старту → расписание не назначается.
+  const d = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  $('#match-date').value = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  $('#match-time').value = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  // Сброс сегментов к дефолтам (первый вариант активен)
+  $$('#seg-scorer .seg-btn').forEach((b, i) => b.classList.toggle('active', i === 0));
+  $$('#seg-timer .seg-btn').forEach((b, i) => b.classList.toggle('active', i === 0));
   goToStep(1);
   showScreen('screen-create');
   loadUsersForWizard();
@@ -830,7 +919,7 @@ function renderUserList() {
       <span class="check">✓</span>`;
     row.addEventListener('click', () => {
       if (state.wizard.selected[uid]) delete state.wizard.selected[uid];
-      else state.wizard.selected[uid] = { nickname: u.nickname, avatar: u.avatar || null, color: u.color || null };
+      else state.wizard.selected[uid] = { nickname: u.nickname, avatar: u.avatar || null, color: u.color || null, photo: u.photo || null };
       renderUserList();
     });
     list.appendChild(row);
@@ -845,25 +934,38 @@ async function createMatch() {
   if (!state.wizard.goalType) { showAlert('Не выбран тип матча', '🎯'); return; }
 
   const matchId = db.ref('matches').push().key;
+  const matchName = (($('#match-name').value || '').trim()) || `Матч ${state.nickname}`;
+  // Дата + время → метка старта. Назначаем, только если реально в будущем (>30с).
+  const dateVal = $('#match-date').value, timeVal = $('#match-time').value;
+  let startAt = null;
+  if (dateVal && timeVal) {
+    const t = new Date(`${dateVal}T${timeVal}`).getTime();
+    if (t && t > serverNow() + 30000) startAt = t;
+  }
 
   const players = {};
   players[state.userId] = {
-    nickname: state.nickname, avatar: state.avatar || null, color: state.color || null,
+    nickname: state.nickname, avatar: state.avatar || null, color: state.color || null, photo: state.photo || null,
     status: 'joined', hits: 0, misses: 0, streak: 0, joinedAt: TS
   };
   selectedIds.forEach(uid => {
     const sel = state.wizard.selected[uid];
     players[uid] = {
-      nickname: sel.nickname, avatar: sel.avatar || null, color: sel.color || null,
+      nickname: sel.nickname, avatar: sel.avatar || null, color: sel.color || null, photo: sel.photo || null,
       status: 'waiting', hits: 0, misses: 0, streak: 0
     };
   });
 
   const match = {
     creatorId: state.userId,
+    name: matchName,
+    startAt: startAt || null,
     type: 'normal',
     goalType: state.wizard.goalType,                                    // 'common' | 'individual'
     targetHits: state.wizard.goalType === 'common' ? state.wizard.targetHits : null,
+    scorer: state.wizard.scorer || 'shooter',                           // 'shooter' | 'creator'
+    turnSeconds: state.wizard.turnSeconds || 0,                         // 0 = без таймера
+    turnStartedAt: null,
     status: 'lobby',
     players,
     currentTurnIndex: 0,
@@ -874,7 +976,10 @@ async function createMatch() {
   const updates = {};
   selectedIds.forEach(uid => {
     updates['invites/' + uid + '/' + matchId] = {
+      name: matchName,
+      startAt: startAt || null,
       creatorNickname: state.nickname, creatorAvatar: state.avatar || null, creatorColor: state.color || null,
+      creatorPhoto: state.photo || null,
       goalType: state.wizard.goalType, timestamp: TS
     };
   });
@@ -920,20 +1025,23 @@ function onMatchValue(snap) {
    ================================================================ */
 function renderLobby(m) {
   showScreen('screen-lobby');
+  stopTurnTimer();
   const isCreator = m.creatorId === state.userId;
   const creatorNick = (m.players[m.creatorId] || {}).nickname || '—';
 
-  $('#lobby-title').textContent = isCreator ? 'Твоё лобби' : 'Лобби · ' + creatorNick;
-  $('#lobby-info').textContent = m.goalType === 'common'
+  $('#lobby-title').textContent = m.name || (isCreator ? 'Твоё лобби' : 'Лобби · ' + creatorNick);
+  let info = m.goalType === 'common'
     ? `🎯 На цель — каждому нужно набрать ${m.targetHits} попаданий`
     : '🔥 Свободный матч — заканчивает создатель, побеждает лучший счёт';
+  if (m.turnSeconds) info += ` · ⏱ ${m.turnSeconds}с на ход`;
+  if (m.scorer === 'creator') info += ' · броски отмечает создатель';
+  if (m.startAt) info += ` · 🕐 старт в ${fmtClock(m.startAt)}`;
+  $('#lobby-info').textContent = info;
 
   const box = $('#lobby-players');
   box.innerHTML = '';
-  let joinedOthers = 0;
 
   Object.entries(m.players).forEach(([uid, p]) => {
-    if (uid !== m.creatorId && p.status === 'joined') joinedOthers++;
     let badge;
     if (uid === m.creatorId)          badge = '<span class="badge creator">создатель</span>';
     else if (p.status === 'joined')   badge = '<span class="badge joined">присоединился</span>';
@@ -947,54 +1055,66 @@ function renderLobby(m) {
     box.appendChild(row);
   });
 
+  lobbyMatch = m;
+  refreshStartBtn();
+  if (!lobbyIntervalId) lobbyIntervalId = setInterval(refreshStartBtn, 1000);
+}
+
+// Состояние кнопки «Начать»: гейт по времени старта + «начать с теми, кто есть»
+function refreshStartBtn() {
+  const m = lobbyMatch;
+  if (!m) return;
   const startBtn = $('#start-btn');
-  if (isCreator) {
-    startBtn.style.display = 'block';
-    startBtn.disabled = joinedOthers < 1;
-    startBtn.textContent = joinedOthers < 1 ? 'Ждём игроков...' : 'Начать матч';
-  } else {
-    startBtn.style.display = 'none';
+  if (m.creatorId !== state.userId) { startBtn.style.display = 'none'; return; }
+  startBtn.style.display = 'block';
+
+  const players = Object.entries(m.players || {});
+  const joinedOthers = players.filter(([uid, p]) => uid !== m.creatorId && p.status === 'joined').length;
+  const someWaiting  = players.some(([uid, p]) => uid !== m.creatorId && p.status === 'waiting');
+  const now = serverNow();
+  const scheduled = m.startAt && now < m.startAt;
+
+  if (joinedOthers < 1) { startBtn.disabled = true; startBtn.textContent = 'Ждём игроков...'; return; }
+  if (scheduled) {
+    startBtn.disabled = true;
+    startBtn.textContent = `Старт через ${fmtCountdown(Math.ceil((m.startAt - now) / 1000))}`;
+    return;
   }
+  startBtn.disabled = false;
+  startBtn.textContent = someWaiting ? 'Начать с теми, кто есть' : 'Начать матч';
+}
+
+function stopLobbyTimer() {
+  if (lobbyIntervalId) { clearInterval(lobbyIntervalId); lobbyIntervalId = null; }
+  lobbyMatch = null;
 }
 
 async function startMatch() {
   const mid = state.currentMatchId;
-  let waitingUids = [];
+  let started = false;
 
   const res = await db.ref('matches/' + mid).transaction(m => {
-    // Если матча нет или он уже не в лобби — отменяем транзакцию
+    started = false;
     if (!m || m.status !== 'lobby') return m;
+    if (m.startAt && serverNow() < m.startAt) return m;   // ещё не наступило время старта
 
-    // Собираем тех, кто успел присоединиться на момент выполнения транзакции
+    // Стартуем с теми, кто уже присоединился (создатель + минимум 1 игрок)
     const joined = Object.entries(m.players || {})
       .filter(([, p]) => p.status === 'joined')
       .sort((a, b) => (a[1].joinedAt || 0) - (b[1].joinedAt || 0));
-    
+    if (joined.length < 2) return m;
+
     m.turnOrder = joined.map(([uid]) => uid);
     m.currentTurnIndex = 0;
     m.status = 'active';
-
-    // Отклоняем тех, кто всё ещё "в ожидании"
-    waitingUids = []; // очищаем массив на случай повторного запуска транзакции
-    Object.entries(m.players || {}).forEach(([uid, p]) => {
-      if (p.status === 'waiting') {
-        p.status = 'declined';
-        waitingUids.push(uid);
-      }
-    });
-
+    m.turnStartedAt = serverNow();
+    // «Ожидающих» НЕ отклоняем и приглашения НЕ удаляем — они смогут
+    // присоединиться к уже идущему матчу позже (поздний вход).
+    started = true;
     return m;
   });
 
-  // Если транзакция прошла успешно, убираем приглашения у "опоздавших" и пишем событие
-  if (res.committed && res.snapshot.exists()) {
-    if (waitingUids.length > 0) {
-      const updates = {};
-      waitingUids.forEach(uid => {
-        updates['invites/' + uid + '/' + mid] = null;
-      });
-      db.ref().update(updates);
-    }
+  if (started && res.committed && res.snapshot.exists()) {
     db.ref('matches/' + mid + '/events').push({ time: Date.now(), userId: '', action: 'start', text: '🏀 Матч начался!' });
   }
 }
@@ -1004,11 +1124,9 @@ async function leaveLobby() {
   const mid = state.currentMatchId;
   const snap = await db.ref('matches/' + mid).get();
   const m = snap.val();
-  if (m && m.creatorId === state.userId) {
-    const updates = { ['matches/' + mid]: null };
-    Object.keys(m.players || {}).forEach(uid => { updates['invites/' + uid + '/' + mid] = null; });
-    await db.ref().update(updates);
-  } else if (m) {
+  // Создатель просто выходит — матч остаётся сохранённым в «Мои матчи»
+  // (оттуда можно вернуться, изменить или удалить). Приглашённый — отмечает выход.
+  if (m && m.creatorId !== state.userId) {
     await db.ref('matches/' + mid + '/players/' + state.userId + '/status').set('declined');
   }
   goMenu();
@@ -1023,20 +1141,31 @@ function medal(place) {
 
 function renderMatch(m) {
   showScreen('screen-match');
+  stopLobbyTimer();
   ensureNet();
   const order = m.turnOrder || [];
   const activeId = order[m.currentTurnIndex];
   const isMyTurn = activeId === state.userId;
   const isCreator = m.creatorId === state.userId;
   const isCommon = m.goalType === 'common';
+  const scorer = effectiveScorer(m);   // при выходе создателя откатывается на 'shooter'
+  const iAmScorer = scorer === 'creator' ? isCreator : isMyTurn;
 
   // Кто бросает
   const activeNick = (m.players[activeId] || {}).nickname || '—';
   const turnEl = $('#match-turn');
-  if (isMyTurn) { turnEl.innerHTML = 'Твой бросок'; turnEl.classList.add('my'); }
-  else { turnEl.innerHTML = `Бросает <b>${escapeHtml(activeNick)}</b>`; turnEl.classList.remove('my'); }
+  if (scorer === 'creator' && isCreator) {
+    turnEl.innerHTML = `Отметь: <b>${escapeHtml(activeNick)}</b>`; turnEl.classList.remove('my');
+  } else if (isMyTurn) {
+    turnEl.innerHTML = 'Твой бросок'; turnEl.classList.add('my');
+  } else {
+    turnEl.innerHTML = `Бросает <b>${escapeHtml(activeNick)}</b>`; turnEl.classList.remove('my');
+  }
 
-  $('#match-target').textContent = isCommon ? `ТАБЛО · ДО ${m.targetHits}` : 'ТАБЛО · СВОБОДНЫЙ';
+  setupTurnTimer(m);
+
+  const boardName = m.name || 'ТАБЛО';
+  $('#match-target').textContent = isCommon ? `${boardName} · ДО ${m.targetHits}` : `${boardName} · СВОБОДНЫЙ`;
 
   // Рейтинг-таблица: сортировка по попаданиям
   const rows = order.map(uid => ({ uid, p: m.players[uid] })).filter(x => x.p)
@@ -1069,36 +1198,33 @@ function renderMatch(m) {
     tb.appendChild(row);
   });
 
-  // Анимация нового события (у всех клиентов)
-// Анимация нового события (у всех клиентов)
-// Анимация и рендер нового события (у всех клиентов)
+  // --- Лента «Ход матча»: только 10 последних (полный лог — в истории матчей) ---
   const events = m.events ? Object.values(m.events) : [];
-  
-  // 1. Сортируем от старых к новым (новые будут появляться внизу)
-  events.sort((a, b) => (a.time || 0) - (b.time || 0));
-  
-  // Отрисовка ленты событий
+  events.sort((a, b) => (a.time || 0) - (b.time || 0)); // от старых к новым
+
   const feed = $('#match-events-feed');
   if (feed) {
     feed.innerHTML = '';
-    events.forEach(ev => {
+    events.slice(-10).forEach(ev => {
       const el = document.createElement('div');
-      el.className = 'event-item ' + ev.action;
-      el.textContent = ev.text;
+      el.className = 'event-item ' + (ev.action || '');
+      el.textContent = ev.text || '';
       feed.appendChild(el);
     });
-    
-    // 2. АВТОСКРОЛЛ в самый низ к новому событию
-    feed.scrollTop = feed.scrollHeight;
+    feed.scrollTop = feed.scrollHeight; // автоскролл к последнему
   }
 
-  // 3. Самое новое событие теперь находится в конце массива
+  // Фидбек (звук + анимация) на КАЖДОЕ новое событие с прошлого рендера.
+  // Важно для победного броска: в одной транзакции пишутся hit + finish,
+  // поэтому надо проиграть оба, а не только самое последнее событие.
+  if (lastEventTime !== null) {
+    events.filter(ev => (ev.time || 0) > lastEventTime).forEach(triggerShotFeedback);
+  }
   const newest = events[events.length - 1];
-  if (newest && lastEventTime !== null && newest.time > lastEventTime) triggerShotFeedback(newest);
   if (newest) lastEventTime = Math.max(lastEventTime || 0, newest.time || 0);
   // Кнопки броска — только активному игроку
-  const me = m.players[state.userId];
-  const canShoot = isMyTurn && me && !me.finished && !me.left;
+  const activePlayer = m.players[activeId];
+  const canShoot = iAmScorer && activePlayer && !activePlayer.finished && !activePlayer.left;
   $('#btn-hit').disabled = !canShoot;
   $('#btn-miss').disabled = !canShoot;
   $('#finish-btn').hidden = !isCreator;   // ⏹ Завершить — только создателю; ⏸ Выйти — всем
@@ -1114,15 +1240,20 @@ function recordShot(result) {
 
   ref.transaction(m => {
     if (!m || m.status !== 'active') return m;
-    
-    // 1. Проверяем, что нажимает именно СОЗДАТЕЛЬ матча
-    if (m.creatorId !== state.userId) return; 
 
-    // 2. Узнаем, чей сейчас ход (кому записываем очки)
+    // Чей сейчас ход
     const order = m.turnOrder || [];
     const activeUid = order[m.currentTurnIndex];
+
+    // Кто вправе отметить бросок:
+    //  scorer='creator' — только создатель матча (за активного игрока);
+    //  scorer='shooter' — сам активный игрок (по умолчанию).
+    // Если создатель вышел — effectiveScorer вернёт 'shooter' (фолбэк).
+    const scorer = effectiveScorer(m);
+    const allowed = scorer === 'creator' ? (m.creatorId === state.userId) : (activeUid === state.userId);
+    if (!allowed) return;
+
     const p = m.players[activeUid];
-    
     if (!p || p.finished || p.left) return;
     if (!m.events) m.events = {};
 
@@ -1157,8 +1288,21 @@ function recordShot(result) {
       if (next === -1) { m.status = 'finished'; m.winnerId = computeWinner(m); m.finishedAt = now; }
       else m.currentTurnIndex = next;
     }
+    // Сброс отсчёта хода на каждый бросок (и когда попал и продолжает, и при передаче хода)
+    if (m.status === 'active') m.turnStartedAt = serverNow();
     return m;
   });
+}
+
+// Фактический режим отметки: если выбран 'creator', но создатель вышел из матча —
+// отмечать может сам бросающий, чтобы игра не зависла.
+function effectiveScorer(m) {
+  const scorer = m.scorer || 'shooter';
+  if (scorer === 'creator') {
+    const c = m.players[m.creatorId];
+    if (!c || c.left) return 'shooter';
+  }
+  return scorer;
 }
 
 // Следующий играющий (не finished / не left) по кругу; -1 если таких нет
@@ -1171,6 +1315,65 @@ function findNextTurn(m, from) {
     if (p && !p.finished && !p.left) return idx;
   }
   return -1;
+}
+
+/* ---------- Таймер на ход ---------- */
+function stopTurnTimer() {
+  if (timerState.intervalId) { clearInterval(timerState.intervalId); timerState.intervalId = null; }
+}
+
+function setupTurnTimer(m) {
+  const wrap = $('#turn-timer');
+  const on = m.status === 'active' && m.turnSeconds > 0 && m.turnStartedAt;
+  if (!on) { stopTurnTimer(); if (wrap) wrap.hidden = true; timerState.startedAt = null; return; }
+  wrap.hidden = false;
+
+  // Уже тикаем для этого хода — не перезапускаем
+  if (timerState.startedAt === m.turnStartedAt && (timerState.intervalId || timerState.firedAt === m.turnStartedAt)) return;
+
+  stopTurnTimer();
+  timerState.startedAt = m.turnStartedAt;
+  const seconds = m.turnSeconds, mid = state.currentMatchId, startedAt = m.turnStartedAt;
+  const bar = $('#turn-timer-bar'), num = $('#turn-timer-num');
+
+  const tick = () => {
+    const rem = seconds - (serverNow() - startedAt) / 1000;
+    const pct = Math.max(0, Math.min(100, (rem / seconds) * 100));
+    if (bar) bar.style.width = pct + '%';
+    if (num) num.textContent = String(Math.max(0, Math.ceil(rem)));
+    wrap.classList.toggle('low', rem <= 5);
+    if (rem <= 0) {
+      stopTurnTimer();
+      if (timerState.firedAt !== startedAt) { timerState.firedAt = startedAt; expireTurn(mid, startedAt, seconds); }
+    }
+  };
+  tick();
+  if (timerState.firedAt !== startedAt) timerState.intervalId = setInterval(tick, 200);
+}
+
+// Время хода вышло → авто-промах активному игроку (защищено по turnStartedAt, срабатывает один раз)
+function expireTurn(mid, expectedStartedAt, seconds) {
+  db.ref('matches/' + mid).transaction(m => {
+    if (!m || m.status !== 'active') return m;
+    if (m.turnStartedAt !== expectedStartedAt) return m;                 // ход уже сменился
+    if ((serverNow() - m.turnStartedAt) < seconds * 1000 - 400) return m; // ещё не истёк (страховка от рассинхрона)
+
+    const order = m.turnOrder || [];
+    const activeUid = order[m.currentTurnIndex];
+    const p = m.players[activeUid];
+    if (!p || p.finished || p.left) return m;
+
+    p.misses = (p.misses || 0) + 1;
+    p.streak = 0;
+    if (!m.events) m.events = {};
+    const k = db.ref().push().key;
+    m.events[k] = { time: Date.now(), userId: activeUid, action: 'miss', text: `${p.nickname} не успел — промах` };
+
+    const next = findNextTurn(m, m.currentTurnIndex);
+    if (next === -1) { m.status = 'finished'; m.winnerId = computeWinner(m); m.finishedAt = Date.now(); }
+    else { m.currentTurnIndex = next; m.turnStartedAt = serverNow(); }
+    return m;
+  });
 }
 
 function winnerByPlace(m) {
@@ -1254,7 +1457,7 @@ async function leaveMatch() {
       if (playing <= 1) { m.status = 'finished'; m.winnerId = computeWinner(m); m.finishedAt = Date.now(); }
       else if (wasActive) {
         const next = findNextTurn(m, m.currentTurnIndex);
-        if (next !== -1) m.currentTurnIndex = next;
+        if (next !== -1) { m.currentTurnIndex = next; m.turnStartedAt = serverNow(); }
       }
     }
     return m;
@@ -1263,12 +1466,11 @@ async function leaveMatch() {
   if (res.committed && res.snapshot && res.snapshot.exists()) {
     const m = res.snapshot.val();
     db.ref('matches/' + mid + '/events').push({
-      time: Date.now(), userId: myId, action: 'leave', text: `${state.nickname} покинул матч`
+      time: Date.now(), userId: myId, action: 'leave', text: `${state.nickname} вышел из матча`
     });
-    // Засчитать матч в статистику + историю при выходе (если игра уже стартовала)
-    if (m.turnOrder && m.turnOrder.indexOf(myId) >= 0) {
-      await finalizePlayer(mid, myId, m);
-    }
+    // Финализируем (статистика + история), ТОЛЬКО если матч из-за выхода завершился.
+    // Иначе матч продолжается и остаётся в «Мои матчи» — можно вернуться.
+    if (m.status === 'finished') await finalizePlayer(mid, myId, m);
   }
 
   stopMatchWatch();
@@ -1282,6 +1484,9 @@ async function leaveMatch() {
    ================================================================ */
 function renderResults(m) {
   showScreen('screen-results');
+  stopTurnTimer();
+  stopLobbyTimer();
+  $('#results-title').textContent = m.name ? 'Итоги · ' + m.name : 'Итоги матча';
   const order = m.turnOrder || Object.keys(m.players).filter(uid => m.players[uid].status === 'joined');
 
   const ranked = order.map(uid => ({ uid, p: m.players[uid] })).filter(x => x.p);
@@ -1351,7 +1556,7 @@ function writeHistory(mid, uid, m) {
   const p = m.players[uid];
   const order = m.turnOrder || Object.keys(m.players);
   const roster = order.map(id => m.players[id]).filter(Boolean).map(x => ({
-    nickname: x.nickname, avatar: x.avatar || null, color: x.color || null,
+    nickname: x.nickname, avatar: x.avatar || null, color: x.color || null, photo: x.photo || null,
     hits: x.hits || 0, misses: x.misses || 0,
     place: x.place || null, left: !!x.left
   })).sort((a, b) => {
@@ -1362,13 +1567,19 @@ function writeHistory(mid, uid, m) {
   });
 
   let result;
-  if (p.left && m.status !== 'finished') result = 'left';
-  else if (m.winnerId === uid)           result = 'win';
-  else                                   result = 'lose';
+  if (p.left)                  result = 'left';
+  else if (m.winnerId === uid) result = 'win';
+  else                         result = 'lose';
+
+  // Полный лог хода матча — чтобы в истории открыть его целиком
+  const events = (m.events ? Object.values(m.events) : [])
+    .sort((a, b) => (a.time || 0) - (b.time || 0))
+    .map(e => ({ action: e.action || '', text: e.text || '', time: e.time || 0 }));
 
   const winner = m.players[m.winnerId];
   db.ref('history/' + uid + '/' + mid).set({
     time: m.finishedAt || Date.now(),
+    name: m.name || null,
     goalType: m.goalType,
     targetHits: m.targetHits || null,
     result,
@@ -1376,7 +1587,8 @@ function writeHistory(mid, uid, m) {
     myHits: p.hits || 0,
     myMisses: p.misses || 0,
     winnerNickname: winner ? winner.nickname : null,
-    roster
+    roster,
+    events
   });
 }
 
@@ -1429,6 +1641,9 @@ function renderHistory(obj) {
       </div>`;
     }).join('');
 
+    const hasLog = Array.isArray(h.events) ? h.events.length : (h.events && Object.keys(h.events).length);
+    const logBtn = hasLog ? '<button class="hc-log-btn">📜 Ход матча</button>' : '';
+
     const card = document.createElement('div');
     card.className = 'history-card ' + resultCls;
     card.innerHTML = `
@@ -1436,8 +1651,159 @@ function renderHistory(obj) {
         <span class="hc-result">${resultTxt}</span>
         <span class="hc-date">${formatDate(h.time)}</span>
       </div>
+      ${h.name ? `<div class="hc-name">${escapeHtml(h.name)}</div>` : ''}
       <div class="hc-mode">${modeTxt} · твой счёт: ${h.myHits} / ${h.myMisses}</div>
-      <div class="hc-players">${players}</div>`;
+      <div class="hc-players">${players}</div>
+      ${logBtn}`;
+    if (hasLog) {
+      const evs = Array.isArray(h.events) ? h.events : Object.values(h.events);
+      card.querySelector('.hc-log-btn').addEventListener('click', () => openMatchLog(evs));
+    }
     list.appendChild(card);
   });
+  }
+
+/* ================================================================
+   ЭКРАН 8 — МОИ МАТЧИ (сохранённые/идущие, куда можно вернуться)
+   ================================================================ */
+async function openMyMatches() {
+  showScreen('screen-mymatches');
+  const list = $('#mymatches-list');
+  list.innerHTML = '';
+  const snap = await db.ref('matches').get();
+  const all = snap.val() || {};
+  const mine = [];
+  for (const [id, m] of Object.entries(all)) {
+    if (!m || !m.players || !m.players[state.userId]) continue;
+    if (m.status === 'finished') {
+      // Ленивая финализация: матч завершился, пока меня не было — засчитать в историю
+      if (!m.players[state.userId].counted) finalizePlayer(id, state.userId, m);
+      continue; // завершённые здесь не показываем — они в «Истории»
+    }
+    mine.push({ id, m });
+  }
+  mine.sort((a, b) => (b.m.createdAt || 0) - (a.m.createdAt || 0));
+  renderMyMatches(mine);
+}
+
+function renderMyMatches(items) {
+  const list = $('#mymatches-list');
+  const empty = $('#mymatches-empty');
+  list.innerHTML = '';
+  empty.style.display = items.length ? 'none' : 'block';
+
+  items.forEach(({ id, m }) => {
+    const me = m.players[state.userId] || {};
+    const isCreator = m.creatorId === state.userId;
+    const isLobby = m.status === 'lobby';
+    const statusBadge = isLobby ? '<span class="mm-badge lobby">Лобби</span>' : '<span class="mm-badge live">Идёт</span>';
+    const roleBadge = isCreator ? '<span class="mm-badge creator">ваш</span>' : '';
+    const leftBadge = me.left ? '<span class="mm-badge left">вы вышли</span>' : '';
+    const count = Object.values(m.players).filter(p => p.status === 'joined').length;
+    const modeTxt = m.goalType === 'common' ? `🎯 до ${m.targetHits}` : '🔥 свободный';
+    const timeTxt = m.startAt ? ` · 🕐 ${fmtClock(m.startAt)}` : '';
+
+    const card = document.createElement('div');
+    card.className = 'history-card';
+    card.innerHTML = `
+      <div class="hc-top">
+        <span class="hc-result">${escapeHtml(m.name || 'Матч')}</span>
+        <span class="mm-badges">${statusBadge}${roleBadge}${leftBadge}</span>
+      </div>
+      <div class="hc-mode">${modeTxt} · 👥 ${count}${timeTxt}</div>
+      <div class="mm-actions"></div>`;
+    const actions = card.querySelector('.mm-actions');
+
+    const enterBtn = document.createElement('button');
+    enterBtn.className = 'btn btn-accent mm-btn';
+    enterBtn.textContent = me.left ? 'Вернуться' : (isLobby ? 'Открыть' : 'Продолжить');
+    enterBtn.addEventListener('click', () => reenterMatch(id, m));
+    actions.appendChild(enterBtn);
+
+    if (isCreator && isLobby) {
+      const editBtn = document.createElement('button');
+      editBtn.className = 'btn btn-ghost mm-btn';
+      editBtn.textContent = 'Изменить';
+      editBtn.addEventListener('click', () => openEditMatch(id, m));
+      actions.appendChild(editBtn);
+
+      const delBtn = document.createElement('button');
+      delBtn.className = 'btn btn-ghost mm-btn';
+      delBtn.textContent = 'Удалить';
+      delBtn.addEventListener('click', () => deleteMatch(id, m));
+      actions.appendChild(delBtn);
+    }
+    list.appendChild(card);
+  });
+}
+
+// Вернуться в матч: если он идёт и я выходил — снимаем «вышел» и дописываемся в очередь
+async function reenterMatch(id, m) {
+  const me = m.players[state.userId];
+  if (m.status === 'active' && me && me.left) {
+    await db.ref('matches/' + id).transaction(mm => {
+      if (!mm || mm.status !== 'active') return mm;
+      const p = mm.players[state.userId];
+      if (!p) return mm;
+      p.left = false;
+      p.status = 'joined';
+      p.streak = 0;
+      mm.turnOrder = mm.turnOrder || [];
+      if (mm.turnOrder.indexOf(state.userId) === -1) mm.turnOrder.push(state.userId);
+      if (!mm.events) mm.events = {};
+      const k = db.ref().push().key;
+      mm.events[k] = { time: Date.now(), userId: state.userId, action: 'join', text: `${state.nickname} вернулся` };
+      return mm;
+    });
+  }
+  enterMatch(id);
+}
+
+async function deleteMatch(id, m) {
+  if (!await showConfirm('Удалить матч? Он исчезнет у всех приглашённых.', 'Удалить', '🗑️')) return;
+  const updates = { ['matches/' + id]: null };
+  Object.keys(m.players || {}).forEach(uid => { updates['invites/' + uid + '/' + id] = null; });
+  await db.ref().update(updates);
+  openMyMatches();
+}
+
+function openEditMatch(id, m) {
+  editingMatchId = id;
+  $('#edit-name').value = m.name || '';
+  const d = m.startAt ? new Date(m.startAt) : new Date();
+  const pad = n => String(n).padStart(2, '0');
+  $('#edit-date').value = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  $('#edit-time').value = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  $('#edit-backdrop').hidden = false;
+}
+
+async function saveEditMatch() {
+  const id = editingMatchId;
+  if (!id) return;
+  const name = (($('#edit-name').value || '').trim()) || `Матч ${state.nickname}`;
+  const dateVal = $('#edit-date').value, timeVal = $('#edit-time').value;
+  let startAt = null;
+  if (dateVal && timeVal) {
+    const t = new Date(`${dateVal}T${timeVal}`).getTime();
+    if (t && t > serverNow() + 30000) startAt = t;
+  }
+  const snap = await db.ref('matches/' + id).get();
+  const m = snap.val();
+  if (!m) { $('#edit-backdrop').hidden = true; editingMatchId = null; return; }
+
+  const updates = {
+    ['matches/' + id + '/name']: name,
+    ['matches/' + id + '/startAt']: startAt
   };
+  // Обновляем приглашения только у тех, кто ещё «в ожидании» (у них приглашение живо)
+  Object.entries(m.players || {}).forEach(([uid, p]) => {
+    if (uid !== m.creatorId && p.status === 'waiting') {
+      updates['invites/' + uid + '/' + id + '/name'] = name;
+      updates['invites/' + uid + '/' + id + '/startAt'] = startAt;
+    }
+  });
+  await db.ref().update(updates);
+  $('#edit-backdrop').hidden = true;
+  editingMatchId = null;
+  openMyMatches();
+}
