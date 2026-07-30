@@ -338,6 +338,44 @@ input[type="time"]::-webkit-calendar-picker-indicator { filter: invert(.7); curs
 .event-item.start  { border-left-color: var(--accent); color: var(--accent-2); }
 .event-item.leave  { border-left-color: var(--faint); color: var(--muted); }
 .event-item.join   { border-left-color: var(--cyan); color: var(--cyan-2); }
+
+/* ============ КНОПКА «СГЕНЕРИРОВАТЬ ВИДЕО» ============ */
+.vid-btn {
+  flex: none; margin-top: 12px; width: 100%; padding: 12px 14px; border-radius: 14px; cursor: pointer;
+  font-family: var(--font); font-size: 13.5px; font-weight: 700; letter-spacing: .02em; color: var(--cyan-2);
+  background: linear-gradient(180deg, rgba(108,201,255,.16), rgba(108,201,255,.07));
+  border: 1px solid rgba(108,201,255,.34);
+  box-shadow: 0 8px 22px rgba(108,201,255,.14), inset 0 1px 0 rgba(255,255,255,.12);
+  transition: transform .12s var(--ease), filter .2s;
+}
+.vid-btn:hover  { filter: brightness(1.12); }
+.vid-btn:active { transform: scale(.97); }
+.vid-btn:disabled { opacity: .45; cursor: default; }
+
+/* ============ МОДАЛКА ВИДЕО ============ */
+.video-modal { max-width: 420px; width: 100%; }
+.vm-stage {
+  position: relative; width: 100%; aspect-ratio: 9 / 16; max-height: 62vh; margin: 4px auto 0;
+  border-radius: 18px; overflow: hidden; background: #0a0c11;
+  border: 1px solid var(--hairline); box-shadow: inset 0 1px 0 rgba(255,255,255,.06), 0 18px 44px rgba(0,0,0,.5);
+}
+.vm-stage canvas, .vm-stage video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; display: block; background: #0a0c11; }
+.vm-overlay {
+  position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px;
+  background: rgba(10,12,17,.82); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); text-align: center; padding: 20px;
+}
+.vm-overlay[hidden] { display: none; }
+.vm-spinner { font-size: 40px; animation: vmSpin 2.4s linear infinite; }
+@keyframes vmSpin { 0%,100% { transform: scale(1) rotate(0); } 50% { transform: scale(1.12) rotate(6deg); } }
+.vm-hint { font-size: 13.5px; color: var(--muted); font-weight: 500; line-height: 1.5; }
+.vm-bar { height: 5px; border-radius: 5px; margin: 14px 0 8px; background: rgba(255,255,255,.1); overflow: hidden; box-shadow: inset 0 1px 2px rgba(0,0,0,.35); }
+.vm-bar-fill { height: 100%; width: 0%; border-radius: 5px; background: linear-gradient(90deg, var(--cyan), var(--cyan-2)); box-shadow: 0 0 12px rgba(108,201,255,.5); transition: width .15s linear; }
+.vm-status { font-size: 11.5px; color: var(--faint); text-align: center; line-height: 1.5; min-height: 34px; }
+.vm-actions { margin-top: 4px; gap: 8px; }
+/* min-width:0 обязателен: без него flex-элемент не сжимается меньше своего текста,
+   и третья кнопка вылезала за край модалки */
+.vm-actions .btn { flex: 1 1 0; min-width: 0; padding-left: 10px; padding-right: 10px;
+  font-size: 14px; white-space: nowrap; }
 .match-foot { padding: 16px 18px 22px; border-top: 1px solid var(--hairline); display: flex; flex-direction: column; gap: 12px; position: relative; z-index: 1; }
 .shot-buttons { display: flex; gap: 12px; }
 .btn-hit  { flex: 1; padding: 21px; font-size: 18px; border-radius: 18px; border: none; color: #06280f;
@@ -397,7 +435,7 @@ input[type="time"]::-webkit-calendar-picker-indicator { filter: invert(.7); curs
 .modal-icon { font-size: 42px; }
 .modal-text { font-size: 16px; font-weight: 600; margin: 14px 0 20px; line-height: 1.45; letter-spacing: -0.01em; }
 .modal-actions { display: flex; gap: 10px; }
-.modal-actions .btn { flex: 1; }
+.modal-actions .btn { flex: 1; min-width: 0; }
 
 /* ============ МОДАЛКА «ХОД МАТЧА» ============ */
 .log-modal { max-width: 400px; }
@@ -408,6 +446,14 @@ input[type="time"]::-webkit-calendar-picker-indicator { filter: invert(.7); curs
   border-radius: 12px; cursor: pointer; transition: background .18s, border-color .18s; }
 .hc-log-btn:hover { background: rgba(108,201,255,.18); border-color: rgba(108,201,255,.45); }
 .hc-log-btn:active { transform: scale(.98); }
+/* кнопка ролика — тёплая, чтобы не сливалась с «Ход матча» */
+.hc-vid-btn { margin-top: 8px; color: #ffc07a; background: rgba(255,138,46,.12); border-color: rgba(255,138,46,.3); }
+.hc-vid-btn:hover { background: rgba(255,138,46,.2); border-color: rgba(255,138,46,.5); }
+.hc-del-btn { margin-top: 8px; width: 100%; padding: 10px; font-family: var(--font); font-size: 13px; font-weight: 600;
+  color: var(--red); background: rgba(251,113,133,.1); border: 1px solid rgba(251,113,133,.28);
+  border-radius: 12px; cursor: pointer; transition: background .18s, border-color .18s; }
+.hc-del-btn:hover { background: rgba(251,113,133,.2); border-color: rgba(251,113,133,.5); }
+.hc-del-btn:active { transform: scale(.98); }
 
 /* ============ МОИ МАТЧИ ============ */
 .mm-badges { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
@@ -514,6 +560,7 @@ input[type="time"]::-webkit-calendar-picker-indicator { filter: invert(.7); curs
 #screen-match .pop.go { animation: mpop 1s ease forwards; }
 #screen-match .pop.make { background: linear-gradient(180deg,#3ad088,#12965a); box-shadow: 0 12px 32px rgba(21,170,95,.48), inset 0 1px 0 rgba(255,255,255,.32); }
 #screen-match .pop.miss { background: linear-gradient(180deg,#fa5c71,#cf2540); box-shadow: 0 12px 32px rgba(209,42,69,.48), inset 0 1px 0 rgba(255,255,255,.26); font-size: 26px; letter-spacing: .06em; text-transform: uppercase; }
+#screen-match .pop.warn { background: linear-gradient(180deg,#8fb4d6,#3f5f80); box-shadow: 0 12px 32px rgba(63,95,128,.48), inset 0 1px 0 rgba(255,255,255,.24); font-size: 18px; letter-spacing: .02em; text-transform: none; }
 @keyframes mpop { 0%{opacity:0;transform:translate(-50%,10px) scale(.6)} 25%{opacity:1;transform:translate(-50%,-6px) scale(1.12)} 100%{opacity:0;transform:translate(-50%,-56px) scale(1)} }
 #screen-match.m-shake .board { animation: mshake .4s ease; }
 @keyframes mshake { 0%,100%{transform:none} 22%{transform:translateX(-8px)} 44%{transform:translateX(7px)} 66%{transform:translateX(-5px)} 88%{transform:translateX(3px)} }

@@ -44,6 +44,8 @@ let prevInviteCount = 0;    // для звука нового приглашен
 let lobbyMatch = null;      // последнее состояние матча в лобби (для отсчёта до старта)
 let lobbyIntervalId = null; // тик обратного отсчёта в лобби
 let editingMatchId = null;  // id матча, открытого в модалке редактирования
+let lastRenderedMatch = null; // последнее состояние матча, показанное на экране (для проверки хода в момент клика)
+let logVideoSource = null;    // запись истории, открытая в модалке лога (для кнопки «Сгенерировать видео»)
 
 /* ================================================================
    УТИЛИТЫ
@@ -561,6 +563,13 @@ function bindEvents() {
   $('#log-close').addEventListener('click', () => { $('#log-backdrop').hidden = true; });
   $('#log-backdrop').addEventListener('click', e => { if (e.target.id === 'log-backdrop') $('#log-backdrop').hidden = true; });
 
+  // --- Видео матча ---
+  MatchVideo.bind();
+  $('#log-video-btn').addEventListener('click', () => {
+    if (!logVideoSource) return;
+    MatchVideo.open(MatchVideo.fromHistory(logVideoSource), 'Видео матча');
+  });
+
   // --- Модалка редактирования матча ---
   $('#edit-save').addEventListener('click', saveEditMatch);
   $('#edit-cancel').addEventListener('click', () => { $('#edit-backdrop').hidden = true; editingMatchId = null; });
@@ -568,7 +577,9 @@ function bindEvents() {
 }
 
 /* Открыть полный лог хода матча (из карточки истории) */
-function openMatchLog(events) {
+function openMatchLog(events, hist) {
+  logVideoSource = hist || null;                    // из чего собирать ролик
+  $('#log-video-btn').hidden = !logVideoSource;
   const feed = $('#log-feed');
   feed.innerHTML = '';
   const list = (events || []).slice().sort((a, b) => (a.time || 0) - (b.time || 0));
@@ -1143,6 +1154,7 @@ function renderMatch(m) {
   showScreen('screen-match');
   stopLobbyTimer();
   ensureNet();
+  lastRenderedMatch = m;
   const order = m.turnOrder || [];
   const activeId = order[m.currentTurnIndex];
   const isMyTurn = activeId === state.userId;
@@ -1238,12 +1250,26 @@ function recordShot(result) {
   const ref = db.ref('matches/' + mid);
   const now = Date.now();
 
-  ref.transaction(m => {
+  // Кого мы ВИДЕЛИ активным в момент клика. Если пока транзакция летит на
+  // сервер, ход уже сменится (например, гонка с авто-промахом по таймеру),
+  // бросок НЕ должен уйти следующему игроку — лучше честно отменить и
+  // сообщить, чем молча записать очко не тому.
+  const expectedOrder = (lastRenderedMatch && lastRenderedMatch.turnOrder) || [];
+  const expectedIdx = lastRenderedMatch ? lastRenderedMatch.currentTurnIndex : -1;
+  const expectedUid = expectedOrder[expectedIdx];
+
+  let raced = false; // ход сменился под ногами — транзакция намеренно отменена
+
+  const p1 = ref.transaction(m => {
+    raced = false;
     if (!m || m.status !== 'active') return m;
 
     // Чей сейчас ход
     const order = m.turnOrder || [];
     const activeUid = order[m.currentTurnIndex];
+
+    // Ход уже перешёл к другому игроку, пока клик долетал до сервера — отменяем.
+    if (expectedUid && activeUid !== expectedUid) { raced = true; return; }
 
     // Кто вправе отметить бросок:
     //  scorer='creator' — только создатель матча (за активного игрока);
@@ -1258,7 +1284,7 @@ function recordShot(result) {
     if (!m.events) m.events = {};
 
     let advance = false;
-    const k1 = db.ref().push().key; 
+    const k1 = db.ref().push().key;
 
     if (result === 'hit') {
       p.hits = (p.hits || 0) + 1;
@@ -1292,6 +1318,10 @@ function recordShot(result) {
     if (m.status === 'active') m.turnStartedAt = serverNow();
     return m;
   });
+
+  p1.then(res => {
+    if (raced || !res.committed) popMatch('Ход сменился', 'warn');
+  }).catch(() => { popMatch('Не отправилось', 'warn'); });
 }
 
 // Фактический режим отметки: если выбран 'creator', но создатель вышел из матча —
@@ -1342,7 +1372,9 @@ function setupTurnTimer(m) {
     if (bar) bar.style.width = pct + '%';
     if (num) num.textContent = String(Math.max(0, Math.ceil(rem)));
     wrap.classList.toggle('low', rem <= 5);
-    if (rem <= 0) {
+    // Небольшой зазор (300мс) после нуля — даём шанс уже отправленному клику
+    // «Попал/Промах» дойти до сервера первым, прежде чем сработает авто-промах.
+    if (rem <= -0.3) {
       stopTurnTimer();
       if (timerState.firedAt !== startedAt) { timerState.firedAt = startedAt; expireTurn(mid, startedAt, seconds); }
     }
@@ -1615,7 +1647,8 @@ function renderHistory(obj) {
   const list = $('#history-list');
   const empty = $('#history-empty');
   list.innerHTML = '';
-  const entries = obj ? Object.values(obj) : [];
+  // Сохраняем ключ записи (_k) — по нему кнопка «Удалить» точечно чистит именно эту запись
+  const entries = obj ? Object.entries(obj).map(([_k, h]) => ({ ...h, _k })) : [];
   entries.sort((a, b) => (b.time || 0) - (a.time || 0));
   empty.style.display = entries.length ? 'none' : 'block';
 
@@ -1643,6 +1676,9 @@ function renderHistory(obj) {
 
     const hasLog = Array.isArray(h.events) ? h.events.length : (h.events && Object.keys(h.events).length);
     const logBtn = hasLog ? '<button class="hc-log-btn">📜 Ход матча</button>' : '';
+    const evsArr = hasLog ? (Array.isArray(h.events) ? h.events : Object.values(h.events)) : [];
+    const hasShots = evsArr.some(e => e.action === 'hit' || e.action === 'miss');
+    const vidBtn = hasShots ? '<button class="hc-log-btn hc-vid-btn">🎬 Сгенерировать видео</button>' : '';
 
     const card = document.createElement('div');
     card.className = 'history-card ' + resultCls;
@@ -1654,11 +1690,16 @@ function renderHistory(obj) {
       ${h.name ? `<div class="hc-name">${escapeHtml(h.name)}</div>` : ''}
       <div class="hc-mode">${modeTxt} · твой счёт: ${h.myHits} / ${h.myMisses}</div>
       <div class="hc-players">${players}</div>
-      ${logBtn}`;
+      ${logBtn}${vidBtn}
+      <button class="hc-del-btn" title="Удалить из истории">🗑 Удалить</button>`;
     if (hasLog) {
-      const evs = Array.isArray(h.events) ? h.events : Object.values(h.events);
-      card.querySelector('.hc-log-btn').addEventListener('click', () => openMatchLog(evs));
+      card.querySelector('.hc-log-btn').addEventListener('click', () => openMatchLog(evsArr, h));
     }
+    if (hasShots) {
+      card.querySelector('.hc-vid-btn').addEventListener('click',
+        () => MatchVideo.open(MatchVideo.fromHistory(h), h.name || 'Видео матча'));
+    }
+    card.querySelector('.hc-del-btn').addEventListener('click', () => deleteHistory(h, card));
     list.appendChild(card);
   });
   }
@@ -1720,6 +1761,16 @@ function renderMyMatches(items) {
     enterBtn.addEventListener('click', () => reenterMatch(id, m));
     actions.appendChild(enterBtn);
 
+    // Ролик можно собрать, если в матче уже были броски
+    const hasShots = Object.values(m.events || {}).some(e => e.action === 'hit' || e.action === 'miss');
+    if (hasShots) {
+      const vidBtn = document.createElement('button');
+      vidBtn.className = 'btn btn-ghost mm-btn';
+      vidBtn.textContent = '🎬 Видео';
+      vidBtn.addEventListener('click', () => MatchVideo.open(MatchVideo.fromMatch(m), m.name || 'Видео матча'));
+      actions.appendChild(vidBtn);
+    }
+
     if (isCreator && isLobby) {
       const editBtn = document.createElement('button');
       editBtn.className = 'btn btn-ghost mm-btn';
@@ -1767,6 +1818,15 @@ async function deleteMatch(id, m) {
   openMyMatches();
 }
 
+// Удалить одну запись из истории (только у себя — история у каждого своя)
+async function deleteHistory(h, card) {
+  const label = h.name ? '«' + h.name + '»' : 'этот матч';
+  if (!await showConfirm('Удалить ' + label + ' из истории? Только у тебя.', 'Удалить', '🗑️')) return;
+  if (h._k) await db.ref('history/' + state.userId + '/' + h._k).remove();
+  card.remove();
+  if (!$('#history-list').children.length) $('#history-empty').style.display = 'block';
+}
+
 function openEditMatch(id, m) {
   editingMatchId = id;
   $('#edit-name').value = m.name || '';
@@ -1807,3 +1867,1195 @@ async function saveEditMatch() {
   editingMatchId = null;
   openMyMatches();
 }
+
+/* ================================================================
+   ВИДЕО МАТЧА — 18-секундный ролик, собранный из хода матча
+   ================================================================
+   Кадры рисуются на canvas в стиле экрана матча, звук — трек с 22-й
+   секунды, всё вместе пишется через MediaRecorder в один файл.
+
+   Сюжет (в скобках — секунда трека):
+     0.0 (22)  разгон: реплей всех бросков, попадание — зелёным, промах — красным
+     4.0 (26)  чёрно-белая вспышка, на табло остаётся только победитель
+     4.5 (26)  реплей бросков победителя: счёт, серии
+    10.0 (32)  фон сереет и темнеет, замедленный решающий бросок на весь экран
+    11.0 (33)  карточка победителя: корона, счёт, макс. серия, ☠️
+    18.0 (40)  конец
+   ================================================================ */
+const MatchVideo = (() => {
+  const AUDIO_FILE  = 'Ogryzek - AURA (super slowed + reverb).mp3';
+  const AUDIO_START = 22;                 // с какой секунды трека стартуем
+  const W = 720, H = 1280, FPS = 30, DUR = 18;
+
+  // Ключевые точки сюжета в секундах ВИДЕО (= секунда трека − AUDIO_START)
+  const T_BW   = 26 - AUDIO_START;        // 4.0
+  const T_SLOW = 32 - AUDIO_START;        // 10.0
+  const T_WIN  = 33 - AUDIO_START;        // 11.0
+
+  const BW_LEN = 0.55;                    // длительность ч/б вспышки и перестроения
+  const A0 = 0.5,  A1 = T_BW - 0.15;      // окно реплея всех игроков
+  const R0 = T_BW + BW_LEN, R1 = T_SLOW - 0.25; // окно реплея победителя
+  const SHOT_FLY = 0.8;                   // полёт мяча в слоу-мо
+
+  // Палитра — та же, что в CSS
+  const C = {
+    bg: '#0a0c11', text: '#f3f5f8', muted: 'rgba(255,255,255,.54)', faint: 'rgba(255,255,255,.34)',
+    cyan: '#6cc9ff', cyan2: '#a6ddff', accent: '#ff7a45', accent2: '#ff9563',
+    green: '#4ade80', red: '#fb7185', gold: '#ffd36b', hair: 'rgba(255,255,255,.09)'
+  };
+  const FONT  = 'Inter, system-ui, -apple-system, "Segoe UI", sans-serif';
+  const EMOJI = '"Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif';
+
+  /* ---------- состояние модуля ---------- */
+  let source = null;      // нормализованные данные матча
+  let running = false;    // идёт запись/проигрывание
+  let cancelled = false;
+  let blob = null, blobUrl = null, fileName = 'match.webm';
+  let AC = null, gainNode = null, audioDest = null;
+  let audioBuf = null, srcNode = null;    // вшитый кусок трека и его источник
+  let monitor = null, silent = false;     // контроль, что в дорожку реально идёт сигнал
+  let AF = null;                          // разбор трека по битам: громкость и удары
+  const photoCache = {};  // dataURI -> Image
+
+  /* ================= НОРМАЛИЗАЦИЯ ДАННЫХ ================= */
+
+  // Из живого матча
+  function fromMatch(m) {
+    if (!m || !m.players) return null;
+    const order = (m.turnOrder && m.turnOrder.length) ? m.turnOrder : Object.keys(m.players);
+    const players = order.map(id => {
+      const p = m.players[id];
+      return p ? { id, nickname: p.nickname, avatar: p.avatar || null, photo: p.photo || null,
+                   color: p.color || null, hits: p.hits || 0, misses: p.misses || 0,
+                   place: p.place || null, left: !!p.left } : null;
+    }).filter(Boolean);
+    const events = Object.values(m.events || {})
+      .sort((a, b) => (a.time || 0) - (b.time || 0))
+      .map(e => ({ userId: e.userId || null, action: e.action || '', text: e.text || '' }));
+    return finish({
+      name: m.name || 'Матч',
+      time: m.finishedAt || Date.now(),
+      goalType: m.goalType, targetHits: m.targetHits || null,
+      players, events, winnerId: m.winnerId || null
+    });
+  }
+
+  // Из записи истории (в ней у событий нет userId — вычисляем по нику в тексте)
+  function fromHistory(h) {
+    if (!h) return null;
+    const players = (h.roster || []).map((r, i) => ({
+      id: 'p' + i, nickname: r.nickname, avatar: r.avatar || null, photo: r.photo || null,
+      color: r.color || null, hits: r.hits || 0, misses: r.misses || 0,
+      place: r.place || null, left: !!r.left
+    }));
+    const raw = Array.isArray(h.events) ? h.events : Object.values(h.events || {});
+    // длинные ники вперёд, чтобы «Ден» не перехватил событие «Дениса»
+    const byLen = players.slice().sort((a, b) => (b.nickname || '').length - (a.nickname || '').length);
+    const events = raw.slice().sort((a, b) => (a.time || 0) - (b.time || 0)).map(e => {
+      const txt = e.text || '';
+      const owner = byLen.find(p => p.nickname && txt.indexOf(p.nickname) !== -1);
+      return { userId: owner ? owner.id : null, action: e.action || '', text: txt };
+    });
+    let winnerId = null;
+    if (h.winnerNickname) { const w = players.find(p => p.nickname === h.winnerNickname); if (w) winnerId = w.id; }
+    return finish({
+      name: h.name || 'Матч', time: h.time || Date.now(),
+      goalType: h.goalType, targetHits: h.targetHits || null,
+      players, events, winnerId
+    });
+  }
+
+  // Досчитать всё, что нужно ролику: порядок, броски, серии, победитель
+  function finish(d) {
+    d.players.sort((a, b) => {
+      if (a.place && b.place) return a.place - b.place;
+      if (a.place) return -1;
+      if (b.place) return 1;
+      return (b.hits || 0) - (a.hits || 0);
+    });
+
+    d.shots = d.events.filter(e => e.action === 'hit' || e.action === 'miss');
+
+    const streak = {}, best = {};
+    d.shots.forEach(s => {
+      const u = s.userId; if (!u) return;
+      if (s.action === 'hit') { streak[u] = (streak[u] || 0) + 1; best[u] = Math.max(best[u] || 0, streak[u]); }
+      else streak[u] = 0;
+    });
+    d.players.forEach(p => { p.best = best[p.id] || 0; });
+
+    if (!d.winnerId || !d.players.some(p => p.id === d.winnerId)) {
+      const alive = d.players.filter(p => !p.left);
+      d.winnerId = (alive[0] || d.players[0] || {}).id || null;
+    }
+    d.winner = d.players.find(p => p.id === d.winnerId) || d.players[0] || null;
+    d.winShots = d.winner ? d.shots.filter(s => s.userId === d.winner.id) : [];
+    return d;
+  }
+
+  /* ================= РИСОВАЛКИ ================= */
+
+  function rr(ctx, x, y, w, h, r) {
+    const rad = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    if (ctx.roundRect) { ctx.roundRect(x, y, w, h, rad); return; }
+    ctx.moveTo(x + rad, y);
+    ctx.arcTo(x + w, y, x + w, y + h, rad); ctx.arcTo(x + w, y + h, x, y + h, rad);
+    ctx.arcTo(x, y + h, x, y, rad);         ctx.arcTo(x, y, x + w, y, rad);
+    ctx.closePath();
+  }
+
+  // Текст с вертикальным градиентом — как background-clip:text в CSS
+  function gtext(ctx, txt, x, y, size, weight, c1, c2, align) {
+    ctx.save();
+    ctx.font = weight + ' ' + size + 'px ' + FONT;
+    ctx.textAlign = align || 'center'; ctx.textBaseline = 'middle';
+    const g = ctx.createLinearGradient(0, y - size * .58, 0, y + size * .58);
+    g.addColorStop(0, c1); g.addColorStop(1, c2);
+    ctx.fillStyle = g; ctx.fillText(txt, x, y);
+    ctx.restore();
+  }
+
+  function text(ctx, txt, x, y, size, weight, color, align, spacing) {
+    ctx.save();
+    ctx.font = weight + ' ' + size + 'px ' + FONT;
+    ctx.textAlign = align || 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = color;
+    if (spacing && 'letterSpacing' in ctx) ctx.letterSpacing = spacing + 'px';
+    ctx.fillText(txt, x, y);
+    ctx.restore();
+  }
+
+  // Подобрать кегль, чтобы строка влезла в ширину; если совсем нет — обрезать
+  function fit(ctx, txt, maxW, size, min, weight, spacing) {
+    let s = size;
+    while (s > min && measure(ctx, txt, s, weight, spacing) > maxW) s -= 1;
+    let out = txt;
+    while (out.length > 4 && measure(ctx, out + '…', s, weight, spacing) > maxW) out = out.slice(0, -1);
+    return { size: s, txt: out === txt ? txt : out + '…' };
+  }
+
+  function measure(ctx, txt, size, weight, spacing) {
+    ctx.save();
+    ctx.font = weight + ' ' + size + 'px ' + FONT;
+    if (spacing && 'letterSpacing' in ctx) ctx.letterSpacing = spacing + 'px';
+    const w = ctx.measureText(txt).width;
+    ctx.restore();
+    return w;
+  }
+
+  function emoji(ctx, ch, x, y, size, alpha) {
+    ctx.save();
+    ctx.globalAlpha = alpha === undefined ? 1 : alpha;
+    ctx.font = size + 'px ' + EMOJI;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(ch, x, y);
+    ctx.restore();
+  }
+
+  function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+  function ease(p) { return p < .5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2; }
+  function easeOut(p) { return 1 - Math.pow(1 - p, 3); }
+  function hexA(hex, a) {
+    const n = parseInt((hex || '#888888').slice(1), 16);
+    return 'rgba(' + (n >> 16) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')';
+  }
+  function pColor(p) {
+    if (p && p.color) return p.color;
+    return typeof colorFromString === 'function' ? colorFromString((p && p.nickname) || '') : '#6cc9ff';
+  }
+
+  // Фон площадки — как #screen-match
+  function drawBg(ctx) {
+    ctx.fillStyle = C.bg; ctx.fillRect(0, 0, W, H);
+    let g = ctx.createLinearGradient(0, 0, 0, H * .42);
+    g.addColorStop(0, 'rgba(22,34,52,.5)'); g.addColorStop(1, 'rgba(22,34,52,0)');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H * .42);
+    g = ctx.createRadialGradient(W / 2, 40, 0, W / 2, 40, W * .62);
+    g.addColorStop(0, 'rgba(255,255,255,.06)'); g.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H * .5);
+    g = ctx.createRadialGradient(W / 2, H, 0, W / 2, H, W * .95);
+    g.addColorStop(0, 'rgba(255,138,58,.15)'); g.addColorStop(1, 'rgba(255,138,58,0)');
+    ctx.fillStyle = g; ctx.fillRect(0, H * .55, W, H * .45);
+  }
+
+  // Кольцо со щитом и сеткой — повторяет SVG с экрана матча
+  function drawHoop(ctx, cx, topY, s, tint, netWob) {
+    ctx.save();
+    ctx.translate(cx - 200 * s, topY);
+    ctx.scale(s, s);
+
+    ctx.fillStyle = 'rgba(255,255,255,.05)';
+    ctx.strokeStyle = 'rgba(255,255,255,.16)'; ctx.lineWidth = 1.5;
+    rr(ctx, 118, 18, 164, 118, 14); ctx.fill(); ctx.stroke();
+
+    ctx.strokeStyle = tint || C.accent; ctx.lineWidth = 3; ctx.globalAlpha = .8;
+    rr(ctx, 168, 60, 64, 46, 4); ctx.stroke(); ctx.globalAlpha = 1;
+
+    const N = 12, ncx = 200, tY = 152, tRx = 62, tRy = 15, bY = 214, bRx = 26, bRy = 6;
+    const top = [], bot = [], wob = netWob || 0;
+    for (let i = 0; i < N; i++) {
+      const a = (i / N) * Math.PI * 2 - Math.PI / 2;
+      top.push([ncx + Math.cos(a) * tRx, tY + Math.sin(a) * tRy]);
+      bot.push([ncx + Math.cos(a) * bRx * (1 + wob * .5), bY + Math.sin(a) * bRy + wob * 26]);
+    }
+    ctx.strokeStyle = 'rgba(255,255,255,.5)'; ctx.lineWidth = 1.3;
+    ctx.beginPath();
+    for (let i = 0; i < N; i++) {
+      ctx.moveTo(top[i][0], top[i][1]); ctx.lineTo(bot[i][0], bot[i][1]);
+      ctx.moveTo(top[i][0], top[i][1]); ctx.lineTo(bot[(i + 1) % N][0], bot[(i + 1) % N][1]);
+    }
+    ctx.stroke();
+
+    ctx.strokeStyle = tint ? 'rgba(255,255,255,.35)' : 'rgba(255,138,58,.4)'; ctx.lineWidth = 5;
+    ctx.beginPath(); ctx.ellipse(200, 152, 64, 16, 0, Math.PI, Math.PI * 2); ctx.stroke();
+    ctx.strokeStyle = tint || '#ff8a3a'; ctx.lineWidth = 6;
+    ctx.shadowColor = tint || 'rgba(255,138,58,.7)'; ctx.shadowBlur = 14;
+    ctx.beginPath(); ctx.ellipse(200, 152, 64, 16, 0, 0, Math.PI); ctx.stroke();
+    ctx.restore();
+  }
+
+  // Мяч — как SVG #match-ball
+  function drawBall(ctx, x, y, r, rot) {
+    ctx.save();
+    ctx.translate(x, y); ctx.rotate(rot || 0); ctx.scale(r / 46, r / 46);
+    ctx.shadowColor = 'rgba(0,0,0,.5)'; ctx.shadowBlur = 18; ctx.shadowOffsetY = 8;
+    const g = ctx.createRadialGradient(-11, -16, 2, 0, 0, 62);
+    g.addColorStop(0, '#ffb27a'); g.addColorStop(.55, '#ff7a2e'); g.addColorStop(1, '#d1541a');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 0, 46, 0, Math.PI * 2); ctx.fill();
+    ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+    ctx.strokeStyle = 'rgba(58,22,8,.85)'; ctx.lineWidth = 2.4;
+    ctx.beginPath();
+    ctx.arc(0, 0, 46, 0, Math.PI * 2);
+    ctx.moveTo(0, -46); ctx.lineTo(0, 46);
+    ctx.moveTo(-46, 0); ctx.lineTo(46, 0);
+    ctx.moveTo(-35, -32); ctx.quadraticCurveTo(0, 0, -35, 32);
+    ctx.moveTo(35, -32);  ctx.quadraticCurveTo(0, 0, 35, 32);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // Аватар: фото или эмодзи/буква в кружке с обводкой цветом игрока
+  function drawAvatar(ctx, p, cx, cy, r, glow) {
+    const col = pColor(p);
+    ctx.save();
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.fillStyle = hexA(col, .16); ctx.fill();
+    const img = p.photo ? photoCache[p.photo] : null;
+    if (img && img.complete && img.naturalWidth) {
+      ctx.save(); ctx.clip();
+      const sc = Math.max((r * 2) / img.naturalWidth, (r * 2) / img.naturalHeight);
+      const w = img.naturalWidth * sc, h = img.naturalHeight * sc;
+      ctx.drawImage(img, cx - w / 2, cy - h / 2, w, h);
+      ctx.restore();
+    } else {
+      const ch = p.avatar || (p.nickname ? p.nickname.charAt(0).toUpperCase() : '?');
+      ctx.save();
+      ctx.font = '700 ' + Math.round(r * .95) + 'px ' + EMOJI + ', ' + FONT;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = 'rgba(255,255,255,.92)';
+      ctx.fillText(ch, cx, cy + r * .04);
+      ctx.restore();
+    }
+    ctx.lineWidth = Math.max(2, r * .1);
+    ctx.strokeStyle = col;
+    if (glow) { ctx.shadowColor = hexA(col, .9); ctx.shadowBlur = 22 * glow; }
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+  }
+
+  // Шапка: кольцо + название матча + режим/дата
+  function drawHead(ctx, d) {
+    drawHoop(ctx, W / 2, 22, .95, null, 0);
+    const f = fit(ctx, (d.name || 'Матч').toUpperCase(), W - 96, 30, 19, 800);
+    gtext(ctx, f.txt, W / 2, 282, f.size, 800, '#c9ecff', '#5cb4ff');
+    const mode = d.goalType === 'common' ? 'ДО ' + d.targetHits + ' ПОПАДАНИЙ' : 'СВОБОДНЫЙ';
+    const dt = typeof formatDate === 'function' ? formatDate(d.time) : '';
+    text(ctx, mode + '  ·  ' + dt, W / 2, 318, 16, 600, C.faint, 'center', 2.4);
+  }
+
+  /* --- Сцена 1: табло со всеми игроками, реплей бросков --- */
+  function drawBoard(ctx, d, t, alpha) {
+    ctx.save(); ctx.globalAlpha = alpha;
+
+    const n = d.shots.length;
+    const done = n ? clamp(Math.floor((t - A0) / (A1 - A0) * n), 0, n) : 0;
+    const stat = {}, statPrev = {}, flash = {};
+    d.players.forEach(p => { stat[p.id] = { hits: 0, miss: 0 }; });
+    for (let i = 0; i < done; i++) {
+      // снимок счёта перед последним броском — от него ведём анимацию перестановки
+      if (i === done - 1) d.players.forEach(p => { statPrev[p.id] = { hits: stat[p.id].hits, miss: stat[p.id].miss }; });
+      const s = d.shots[i]; if (!s.userId || !stat[s.userId]) continue;
+      if (s.action === 'hit') stat[s.userId].hits++; else stat[s.userId].miss++;
+      flash[s.userId] = { at: A0 + (i + 1) / n * (A1 - A0), hit: s.action === 'hit' };
+    }
+    if (!done) d.players.forEach(p => { statPrev[p.id] = { hits: 0, miss: 0 }; });
+    if (t >= A1 || !n) d.players.forEach(p => {
+      statPrev[p.id] = { hits: p.hits, miss: p.misses };
+      stat[p.id] = { hits: p.hits, miss: p.misses };
+    });
+
+    // Высота карточки — под число игроков, по центру свободного места
+    const list0 = d.players;
+    const rowH0 = clamp(608 / Math.max(list0.length, 1), 56, 128);
+    const x = 36, w = W - 72;
+    const h = Math.min(736, 124 + list0.length * rowH0 + 14);
+    const y = 344 + Math.round((736 - h) / 2);
+    ctx.fillStyle = 'rgba(18,28,42,.66)';
+    ctx.save(); ctx.shadowColor = 'rgba(0,0,0,.4)'; ctx.shadowBlur = 40; ctx.shadowOffsetY = 18;
+    rr(ctx, x, y, w, h, 26); ctx.fill(); ctx.restore();
+    ctx.strokeStyle = C.hair; ctx.lineWidth = 1;
+    rr(ctx, x, y, w, h, 26); ctx.stroke();
+
+    text(ctx, 'ТАБЛО', W / 2, y + 34, 15, 800, 'rgba(190,205,225,.55)', 'center', 4);
+    ctx.strokeStyle = C.hair; ctx.beginPath();
+    ctx.moveTo(x + 18, y + 92); ctx.lineTo(x + w - 18, y + 92); ctx.stroke();
+    text(ctx, 'ИГРОК', x + 96,       y + 74, 13, 700, 'rgba(190,205,225,.5)', 'left', 2.4);
+    text(ctx, 'ПОПАЛ', x + w - 168,  y + 74, 13, 700, 'rgba(190,205,225,.5)', 'center', 2.4);
+    text(ctx, 'МИМО',  x + w - 60,   y + 74, 13, 700, 'rgba(190,205,225,.5)', 'center', 2.4);
+
+    // Места считаем по текущему счёту, а не по порядку ходов — то же правило,
+    // что на экране «Итоги»: сначала дошедшие до цели, затем больше попаданий,
+    // при равенстве — меньше промахов.
+    const fin = (t >= A1 || !n);
+    const rankBy = st => list0.slice().sort((a, b) => {
+      const sa = st[a.id] || { hits: 0, miss: 0 }, sb = st[b.id] || { hits: 0, miss: 0 };
+      if (fin) {
+        if (a.place && b.place) return a.place - b.place;
+        if (a.place) return -1;
+        if (b.place) return 1;
+      }
+      if (sb.hits !== sa.hits) return sb.hits - sa.hits;
+      return sa.miss - sb.miss;
+    }).reduce((mp, pl, i) => (mp[pl.id] = i, mp), {});
+
+    // Строки не прыгают, а переезжают: считаем места до последнего броска и после,
+    // и плавно ведём каждую строку между этими двумя позициями.
+    const rNow = rankBy(stat), rPrev = rankBy(statPrev);
+    const tShot = n ? A0 + done / n * (A1 - A0) : A0;
+    const move = easeOut(clamp((t - tShot) / .34, 0, 1));
+    const posOf = p => {
+      const a = rPrev[p.id] || 0, b = rNow[p.id] || 0;
+      return a + (b - a) * move;
+    };
+
+    const rowH = rowH0;
+    const y0 = y + 108;
+
+    // разделители — по фиксированным слотам, иначе они ездили бы вместе со строками
+    for (let i = 0; i < list0.length - 1; i++) {
+      ctx.strokeStyle = 'rgba(120,160,220,.08)'; ctx.beginPath();
+      ctx.moveTo(x + 14, y0 + (i + 1) * rowH); ctx.lineTo(x + w - 14, y0 + (i + 1) * rowH); ctx.stroke();
+    }
+
+    // рисуем сверху вниз, чтобы разъезжающиеся строки перекрывались естественно
+    const list = list0.slice().sort((a, b) => posOf(a) - posOf(b));
+
+    list.forEach(p => {
+      const st = stat[p.id] || { hits: 0, miss: 0 };
+      const f = flash[p.id];
+      const fk = f ? clamp(1 - (t - f.at) / .42, 0, 1) : 0;
+      const pos = posOf(p);
+      const i = Math.round(pos);
+      const ry = y0 + pos * rowH;
+      const cy = ry + rowH / 2;
+      // пока строка переезжает — слегка приподнимаем её и подсвечиваем
+      const moving = Math.min(1, Math.abs((rNow[p.id] || 0) - (rPrev[p.id] || 0))) * (1 - Math.abs(move * 2 - 1));
+      if (moving > 0.01) {
+        ctx.save();
+        ctx.fillStyle = hexA((p.color || '#6cc9ff'), .10 * moving);
+        rr(ctx, x + 8, ry + 3, w - 16, rowH - 6, 16); ctx.fill();
+        ctx.restore();
+      }
+
+      if (fk > 0) {
+        const col = f.hit ? '#4ade80' : '#fb7185';
+        const g = ctx.createLinearGradient(x + 8, 0, x + w - 8, 0);
+        g.addColorStop(0, hexA(col, .32 * fk)); g.addColorStop(1, hexA(col, 0));
+        ctx.fillStyle = g; rr(ctx, x + 8, ry + 3, w - 16, rowH - 6, 16); ctx.fill();
+        ctx.fillStyle = hexA(col, .35 + .65 * fk); rr(ctx, x + 8, ry + 3, 5, rowH - 6, 3); ctx.fill();
+      }
+
+      if (i === 0) gtext(ctx, '#1', x + 46, cy, 22, 800, '#ffe7a6', '#ffbf3d');
+      else text(ctx, '#' + (i + 1), x + 46, cy, 22, 800, C.faint);
+
+      const ar = Math.min(28, rowH * .33);
+      drawAvatar(ctx, p, x + 96, cy, ar, fk * .8);
+      const nick = p.nickname.length > 12 ? p.nickname.slice(0, 11) + '…' : p.nickname;
+      ctx.save(); ctx.shadowColor = 'rgba(108,201,255,.3)'; ctx.shadowBlur = 12;
+      text(ctx, nick, x + 96 + ar + 16, cy - (p.left ? 11 : 0), 23, 700, C.cyan2, 'left');
+      ctx.restore();
+      if (p.left) text(ctx, 'ВЫШЕЛ', x + 96 + ar + 16, cy + 17, 12, 700, C.muted, 'left', 1.6);
+
+      const bump = (fk > 0 && f.hit) ? 1 + fk * .18 : 1;
+      ctx.save();
+      ctx.translate(x + w - 168, cy); ctx.scale(bump, bump);
+      gtext(ctx, String(st.hits), 0, 0, 34, 800, '#ffd695', '#ff8a2e');
+      ctx.restore();
+      text(ctx, String(st.miss), x + w - 60, cy, 24, 700, 'rgba(255,255,255,.4)');
+    });
+    ctx.restore();
+  }
+
+  /* --- Сцена 2: остался только победитель, реплей его бросков --- */
+  function drawReel(ctx, d, t, alpha) {
+    const p = d.winner; if (!p) return;
+    ctx.save(); ctx.globalAlpha = alpha;
+
+    const n = d.winShots.length;
+    const done = n ? clamp(Math.floor((t - R0) / (R1 - R0) * n), 0, n) : 0;
+    let hits = 0, miss = 0, run = 0, best = 0, lastAt = -9, lastHit = false;
+    for (let i = 0; i < done; i++) {
+      const s = d.winShots[i];
+      if (s.action === 'hit') { hits++; run++; if (run > best) best = run; }
+      else { miss++; run = 0; }
+      lastAt = R0 + (i + 1) / n * (R1 - R0); lastHit = s.action === 'hit';
+    }
+    if (t >= R1 || !n) { hits = p.hits; miss = p.misses; best = p.best; }
+    const fk = clamp(1 - (t - lastAt) / .38, 0, 1);
+
+    const x = 36, w = W - 72, y = 344, h = 736;
+    ctx.fillStyle = 'rgba(18,28,42,.66)';
+    ctx.save(); ctx.shadowColor = 'rgba(0,0,0,.4)'; ctx.shadowBlur = 40; ctx.shadowOffsetY = 18;
+    rr(ctx, x, y, w, h, 26); ctx.fill(); ctx.restore();
+    ctx.strokeStyle = C.hair; ctx.lineWidth = 1;
+    rr(ctx, x, y, w, h, 26); ctx.stroke();
+
+    if (fk > 0) {
+      ctx.save();
+      rr(ctx, x, y, w, h, 26); ctx.clip();
+      const g = ctx.createRadialGradient(W / 2, y + 190, 10, W / 2, y + 190, 360);
+      g.addColorStop(0, hexA(lastHit ? '#4ade80' : '#fb7185', .22 * fk));
+      g.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = g; ctx.fillRect(x, y, w, h);
+      ctx.restore();
+    }
+
+    text(ctx, 'ЛИДЕР МАТЧА', W / 2, y + 40, 14, 800, C.gold, 'center', 4);
+    drawAvatar(ctx, p, W / 2, y + 152, 72, .5 + fk * .5);
+    ctx.save(); ctx.shadowColor = 'rgba(108,201,255,.35)'; ctx.shadowBlur = 20;
+    text(ctx, p.nickname, W / 2, y + 264, 40, 800, C.cyan2);
+    ctx.restore();
+
+    const bump = 1 + (lastHit ? fk * .13 : 0);
+    const hw = measure(ctx, String(hits), 92, 800);
+    ctx.save(); ctx.translate(W / 2 - 40, y + 360); ctx.scale(bump, bump);
+    gtext(ctx, String(hits), 0, 0, 92, 800, '#ffd695', '#ff8a2e');
+    ctx.restore();
+    text(ctx, '/ ' + miss, W / 2 - 40 + hw / 2 + 20, y + 378, 30, 700, 'rgba(255,255,255,.38)', 'left');
+    text(ctx, 'ПОПАДАНИЙ  ·  ПРОМАХОВ', W / 2, y + 430, 13, 700, C.faint, 'center', 3);
+
+    if (best > 1) {
+      const label = (run > 1 ? run : best) + ' ПОДРЯД';
+      const tw = measure(ctx, label, 17, 800) + 76;
+      const bx = W / 2 - tw / 2, by = y + 460;
+      ctx.fillStyle = hexA('#ff7a45', run > 1 ? .26 : .13);
+      ctx.strokeStyle = hexA('#ff7a45', .5); ctx.lineWidth = 1;
+      rr(ctx, bx, by, tw, 42, 21); ctx.fill(); ctx.stroke();
+      emoji(ctx, '🔥', bx + 27, by + 21, 21);
+      text(ctx, label, bx + 48, by + 21, 17, 800, C.accent2, 'left', 1.4);
+    }
+
+    // лента бросков: по квадратику на каждый бросок победителя
+    if (n) {
+      const cols = clamp(Math.ceil(Math.sqrt(n * 2.6)), 8, 20);
+      const gap = 5;
+      const cell = clamp(Math.floor((w - 60 - gap * (cols - 1)) / cols), 8, 26);
+      const rows = Math.ceil(n / cols);
+      const gw = cols * cell + (cols - 1) * gap;
+      const gx = W / 2 - gw / 2, gy = y + h - 42 - rows * (cell + gap);
+      for (let i = 0; i < n; i++) {
+        const cxx = gx + (i % cols) * (cell + gap);
+        const cyy = gy + Math.floor(i / cols) * (cell + gap);
+        const on = i < done;
+        const isHit = d.winShots[i].action === 'hit';
+        ctx.fillStyle = !on ? 'rgba(255,255,255,.07)'
+          : (isHit ? hexA('#4ade80', i === done - 1 ? .95 : .58) : hexA('#fb7185', .42));
+        rr(ctx, cxx, cyy, cell, cell, 5); ctx.fill();
+      }
+    }
+    ctx.restore();
+  }
+
+  /* --- Сцена 3: замедленный решающий бросок --- */
+  function drawSlowMo(ctx, d, t) {
+    const local = t - T_SLOW;
+    const p = clamp(local / SHOT_FLY, 0, 1);
+    const e = ease(p);
+    const scored = local >= SHOT_FLY;
+    const after = local - SHOT_FLY;
+
+    const s = 1.85, rimX = W / 2, rimY = 22 + 152 * s;
+    const wob = scored ? Math.sin(clamp(after, 0, .8) * 22) * Math.exp(-after * 5) * .55 : 0;
+    drawHoop(ctx, W / 2, 22, s, scored ? '#4ade80' : null, wob);
+
+    text(ctx, 'РЕШАЮЩИЙ БРОСОК', W / 2, 648, 17, 800,
+         'rgba(255,255,255,' + (0.3 + clamp(local, 0, .5)).toFixed(2) + ')', 'center', 8);
+
+    // траектория — парабола снизу в кольцо, с небольшим уходом влево
+    const bx = k => { const u = 1 - k; return u * u * (W / 2 - 120) + 2 * u * k * (W / 2 - 70) + k * k * rimX; };
+    const by = k => { const u = 1 - k; return u * u * (H - 120) + 2 * u * k * (rimY - 560) + k * k * rimY; };
+
+    if (!scored) {
+      for (let i = 5; i >= 1; i--) {   // шлейф — намёк на смазку движения
+        const k = clamp(e - i * .06, 0, 1);
+        ctx.save(); ctx.globalAlpha = .09 * (1 - i / 6);
+        drawBall(ctx, bx(k), by(k), 42, k * 5);
+        ctx.restore();
+      }
+      drawBall(ctx, bx(e), by(e), 46, e * 5.2);
+    } else {
+      const f = clamp(after / .55, 0, 1);
+      if (f < 1) drawBall(ctx, rimX, rimY + f * 220, 46 * (1 - f * .3), 5.2 + f * 2);
+      const fl = clamp(1 - after / .3, 0, 1);
+      if (fl > 0) { ctx.fillStyle = hexA('#ffffff', .3 * fl); ctx.fillRect(0, 0, W, H); }
+      const rk = clamp(after / .7, 0, 1);
+      if (rk < 1) {
+        ctx.save();
+        ctx.strokeStyle = hexA('#4ade80', .55 * (1 - rk));
+        ctx.lineWidth = 10 * (1 - rk);
+        ctx.beginPath(); ctx.arc(rimX, rimY, 40 + rk * 420, 0, Math.PI * 2); ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    if (d.winner) {
+      ctx.save(); ctx.globalAlpha = clamp(local * 2, 0, 1);
+      drawAvatar(ctx, d.winner, W / 2, H - 215, 46, scored ? 1 : .3);
+      text(ctx, d.winner.nickname, W / 2, H - 132, 30, 800, C.cyan2);
+      ctx.restore();
+    }
+  }
+
+  /* --- Сцена 4: карточка победителя --- */
+  function drawWinner(ctx, d, t) {
+    const p = d.winner; if (!p) return;
+    const local = t - T_WIN;
+    const col = pColor(p);
+
+    const g = ctx.createRadialGradient(W / 2, 420, 20, W / 2, 420, 540);
+    g.addColorStop(0, hexA(col, .2)); g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
+    const nm = (d.name || 'Матч').toUpperCase();
+    text(ctx, nm.length > 24 ? nm.slice(0, 23) + '…' : nm, W / 2, 106, 17, 700, C.faint, 'center', 4);
+
+    const inA = clamp(local / .45, 0, 1), pop = easeOut(inA);
+    ctx.save(); ctx.globalAlpha = inA;
+    emoji(ctx, '👑', W / 2, 232 - (1 - pop) * 40, Math.round(92 * (0.7 + pop * .3)));
+    ctx.restore();
+
+    ctx.save();
+    ctx.translate(W / 2, 418); ctx.scale(.86 + pop * .14, .86 + pop * .14); ctx.translate(-W / 2, -418);
+    drawAvatar(ctx, p, W / 2, 418, 106, 1 + Math.sin(local * 2.2) * .25);
+    ctx.restore();
+
+    ctx.save(); ctx.shadowColor = hexA(col, .5); ctx.shadowBlur = 26;
+    text(ctx, p.nickname, W / 2, 578, 54, 800, C.cyan2);
+    ctx.restore();
+    text(ctx, 'ПОБЕДИТЕЛЬ', W / 2, 628, 15, 800, C.gold, 'center', 6);
+
+    const sA = clamp((local - .25) / .4, 0, 1);
+    ctx.save(); ctx.globalAlpha = sA;
+    const hw = measure(ctx, String(p.hits), 76, 800);
+    gtext(ctx, String(p.hits), W / 2 - 46, 722, 76, 800, '#ffd695', '#ff8a2e');
+    text(ctx, '/ ' + p.misses, W / 2 - 46 + hw / 2 + 18, 734, 30, 700, 'rgba(255,255,255,.38)', 'left');
+    text(ctx, 'ПОПАДАНИЙ  ·  ПРОМАХОВ', W / 2, 782, 13, 700, C.faint, 'center', 3);
+
+    if (p.best > 0) {
+      const label = 'МАКС. СЕРИЯ  ' + p.best;
+      const tw = measure(ctx, label, 18, 800) + 86;
+      const bx = W / 2 - tw / 2, by = 818;
+      ctx.fillStyle = hexA('#ff7a45', .18);
+      ctx.strokeStyle = hexA('#ff7a45', .5); ctx.lineWidth = 1;
+      rr(ctx, bx, by, tw, 48, 24); ctx.fill(); ctx.stroke();
+      emoji(ctx, '🔥', bx + 31, by + 24, 23);
+      text(ctx, label, bx + 54, by + 24, 18, 800, C.accent2, 'left', 2);
+    }
+    ctx.restore();
+
+    // ☠️ по центру — финальный акцент
+    const kA = clamp((local - .55) / .5, 0, 1);
+    if (kA > 0) {
+      const k = easeOut(kA);
+      const puls = 1 + Math.sin(local * 2.6) * .04;
+      ctx.save();
+      ctx.globalAlpha = kA;
+      ctx.shadowColor = 'rgba(255,255,255,.35)'; ctx.shadowBlur = 40 * k;
+      emoji(ctx, '☠️', W / 2, 1032, Math.round(200 * (0.55 + k * .45) * puls));
+      ctx.restore();
+    }
+    const dt = typeof formatDate === 'function' ? formatDate(d.time) : '';
+    text(ctx, dt, W / 2, 1204, 15, 600, C.faint, 'center', 2);
+  }
+
+  /* --- Сборка кадра --- */
+  // Плёночное зерно. Тайлы рисуем один раз и крутим по кругу — генерировать
+  // шум на каждый кадр в полном разрешении слишком дорого для записи в реальном времени.
+  let grainTiles = null;
+  function makeGrain() {
+    grainTiles = [];
+    for (let k = 0; k < 4; k++) {
+      const g = document.createElement('canvas'); g.width = 180; g.height = 320;
+      const gx = g.getContext('2d');
+      const img = gx.createImageData(g.width, g.height);
+      for (let i = 0; i < img.data.length; i += 4) {
+        const v = 110 + ((i * 2654435761 + k * 40503) % 91);   // без Math.random — кадры воспроизводимы
+        img.data[i] = img.data[i + 1] = img.data[i + 2] = v; img.data[i + 3] = 255;
+      }
+      gx.putImageData(img, 0, 0);
+      grainTiles.push(g);
+    }
+  }
+  function drawGrain(ctx, t, alpha) {
+    if (alpha <= 0.005) return;
+    if (!grainTiles) makeGrain();
+    ctx.save();
+    ctx.globalCompositeOperation = 'overlay';
+    ctx.globalAlpha = alpha;
+    ctx.drawImage(grainTiles[Math.floor(t * 24) % grainTiles.length], 0, 0, W, H);
+    ctx.restore();
+  }
+
+  /* Аура: радиальное сияние и вращающиеся лучи за объектом. Рисуется ПОД сценой,
+     цвет берём у победителя — это то самое «свечение», на котором держится стиль. */
+  function drawAura(g, d, t, pop, nrg) {
+    const col = (d.winner && d.winner.color) || '#ff8a2e';
+    const cx = W / 2;
+    const win = t >= T_WIN;
+    const cy = win ? 430 : H * 0.56;          // на реплее «объект» — само табло
+    const R  = (win ? 560 : 520) * (0.84 + 0.2 * pop + 0.1 * nrg);
+    const k  = (0.35 + 0.65 * pop) * (win ? 1 : 1.6);   // на реплее сияние заметнее
+
+    g.save();
+    g.globalCompositeOperation = 'lighter';
+    const rg = g.createRadialGradient(cx, cy, 0, cx, cy, R);
+    rg.addColorStop(0,   hexA(col, .30 * k));
+    rg.addColorStop(.35, hexA(col, .12 * k));
+    rg.addColorStop(1,   hexA(col, 0));
+    g.fillStyle = rg;
+    g.beginPath(); g.arc(cx, cy, R, 0, Math.PI * 2); g.fill();
+
+    // лучи-сияние, медленно вращаются
+    g.translate(cx, cy); g.rotate(t * 0.30);
+    const n = 20;
+    for (let i = 0; i < n; i++) {
+      const a = (i / n) * Math.PI * 2;
+      const len = R * (0.72 + 0.34 * Math.abs(Math.sin(i * 2.7 + t * 1.4)));
+      const wd  = 0.018 + 0.026 * ((i % 3) / 3);
+      const lg = g.createLinearGradient(0, 0, Math.cos(a) * len, Math.sin(a) * len);
+      lg.addColorStop(0,   hexA(col, 0));
+      lg.addColorStop(.3,  hexA(col, .13 * k));
+      lg.addColorStop(1,   hexA(col, 0));
+      g.fillStyle = lg;
+      g.beginPath(); g.moveTo(0, 0);
+      g.lineTo(Math.cos(a - wd) * len, Math.sin(a - wd) * len);
+      g.lineTo(Math.cos(a + wd) * len, Math.sin(a + wd) * len);
+      g.closePath(); g.fill();
+    }
+    g.restore();
+  }
+
+  /* Свечение (bloom): яркие места растекаются светом. Считаем на уменьшенной
+     копии — размывать кадр 720×1280 на каждом кадре не успеть в реальном времени. */
+  let bloomC = null, bloomX = null;
+  function drawBloom(ctx, oc, alpha, punch) {
+    if (alpha <= 0.01 || !('filter' in ctx)) return;
+    if (!bloomC) {
+      bloomC = document.createElement('canvas');
+      bloomC.width = Math.round(W / 4); bloomC.height = Math.round(H / 4);
+      bloomX = bloomC.getContext('2d');
+    }
+    bloomX.clearRect(0, 0, bloomC.width, bloomC.height);
+    bloomX.filter = 'brightness(1.45) saturate(1.8) contrast(1.2)';
+    bloomX.drawImage(oc, 0, 0, bloomC.width, bloomC.height);
+    bloomX.filter = 'none';
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = alpha;
+    ctx.filter = 'blur(9px)';
+    ctx.translate(W / 2, H / 2); ctx.scale(punch, punch); ctx.translate(-W / 2, -H / 2);
+    ctx.drawImage(bloomC, 0, 0, W, H);
+    ctx.restore();
+  }
+
+  // Тряска камеры на удар — детерминированная, чтобы кадры не «шумели» случайно
+  function shakeAt(t, pop) {
+    if (pop < 0.35) return { x: 0, y: 0, r: 0 };
+    const f = Math.floor(t * FPS);
+    const s = (n) => ((Math.sin(n * 12.9898) * 43758.5453) % 1 + 1) % 1 - 0.5;
+    const amp = (pop - 0.35) * 18;
+    return { x: s(f) * amp, y: s(f + 7.3) * amp, r: s(f + 19.1) * amp * 0.0016 };
+  }
+
+  function drawFrame(ctx, oc, occ, d, t) {
+    const beat = beatAt(t), nrg = nrgAt(t);
+    const pop = clamp(beat * 1.7, 0, 1);
+    const canFilter = 'filter' in ctx;
+
+    // 1) базовая сцена — в офскрин, её можно обесцветить целиком
+    occ.clearRect(0, 0, W, H);
+    drawBg(occ);
+    if (t < T_SLOW || t >= T_WIN) drawAura(occ, d, t, pop, nrg);   // сияние за сценой
+
+    let bwFlash = 0;
+    if (t < T_WIN) {
+      drawHead(occ, d);
+      if (t < T_BW) {
+        drawBoard(occ, d, t, 1);
+      } else if (t < T_BW + BW_LEN) {
+        // Табло гаснет, победитель проявляется — но не одновременно,
+        // чтобы слои не наложились кашей под чёрно-белой вспышкой.
+        const k = (t - T_BW) / BW_LEN;
+        if (k < .5) drawBoard(occ, d, t, 1 - easeOut(k / .5));
+        else        drawReel(occ, d, t, easeOut((k - .5) / .5));
+        bwFlash = k < .35 ? k / .35 : clamp(1 - (k - .35) / .5, 0, 1);
+      } else {
+        drawReel(occ, d, t, 1);
+      }
+    } else {
+      drawWinner(occ, d, t);
+    }
+
+    // 2) блит: цвет и масштаб живут по битам трека
+    // Между ударами кадр уходит в серое, на удар возвращается в цвет.
+    // Это и есть «то серо, то обычно» — ровно в такт фонку.
+    let grey;
+    if (t >= T_SLOW && t < T_WIN)      grey = 1;                        // слоу-мо: полностью серо
+    else if (bwFlash > 0)              grey = Math.max(bwFlash, 0.6);   // вспышка на 26-й
+    // Без разбора трека (звук не загрузился) не сереем вообще — иначе весь ролик был бы блёклым
+    else if (!AF)                      grey = 0;
+    // pop — резкая кривая: чуть тише удара, и кадр уже уезжает в ч/б
+    else if (t >= T_WIN)               grey = 0.45 * Math.pow(1 - pop, 1.2);  // победитель — мягче
+    else                               grey = 0.95 * Math.pow(1 - pop, 1.2);  // основная часть — качает
+    const sat = 1 + 0.75 * pop;        // на удар цвета ещё и насыщеннее
+    const bright = 1 + 0.22 * pop;
+
+    const punch = 1 + 0.05 * pop + 0.014 * nrg;   // подскок кадра на удар
+    const sh = shakeAt(t, pop);                   // тряска камеры на удар
+    const cam = c => {                            // общая «камера» для всех слоёв
+      c.translate(W / 2 + sh.x, H / 2 + sh.y); c.rotate(sh.r); c.scale(punch, punch);
+      c.translate(-W / 2, -H / 2);
+    };
+
+    ctx.clearRect(0, 0, W, H);
+    ctx.save();
+    if (canFilter) ctx.filter = 'grayscale(' + grey.toFixed(3) + ') saturate(' + sat.toFixed(2)
+      + ') brightness(' + bright.toFixed(2) + ')';
+    cam(ctx);
+    ctx.drawImage(oc, 0, 0);
+    ctx.restore();
+
+    // 2b) свечение поверх — то самое «ауровое» растекание света
+    drawBloom(ctx, oc, (0.10 + 0.16 * pop) * (1 - grey * 0.55) * (t >= T_WIN ? 0.6 : 1), punch);
+
+    // RGB-сдвиг на сильных ударах — фонковая «глючность»
+    if (canFilter && pop > 0.55 && grey < 0.85) {
+      const dx = (pop - 0.55) * 9;
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = (pop - 0.55) * 0.4;
+      cam(ctx);
+      ctx.filter = 'grayscale(1) sepia(1) hue-rotate(-40deg) saturate(7)';
+      ctx.drawImage(oc, -dx, 0);
+      ctx.filter = 'grayscale(1) sepia(1) hue-rotate(150deg) saturate(7)';
+      ctx.drawImage(oc, dx, 0);
+      ctx.restore();
+    }
+
+    // 3) слой поверх: затемнение + слоу-мо в цвете
+    if (t >= T_SLOW && t < T_WIN) {
+      // фон почти в ноль — на экране должен читаться только бросок
+      ctx.fillStyle = 'rgba(10,12,17,.9)'; ctx.fillRect(0, 0, W, H);
+      drawSlowMo(ctx, d, t);
+    }
+
+    // 3b) неоновый градиент поверх кадра: фиолет сверху, циан снизу.
+    // Между ударами тянет картинку в холодный неон, на удар почти уходит.
+    if (t < T_SLOW || t >= T_WIN) {
+      const ng = ctx.createLinearGradient(0, 0, W * .35, H);
+      ng.addColorStop(0,  'rgba(150,90,255,1)');
+      ng.addColorStop(.5, 'rgba(255,110,60,1)');
+      ng.addColorStop(1,  'rgba(60,200,255,1)');
+      ctx.save();
+      ctx.globalCompositeOperation = 'soft-light';
+      ctx.globalAlpha = 0.26 - 0.14 * pop;
+      ctx.fillStyle = ng; ctx.fillRect(0, 0, W, H);
+      ctx.restore();
+    }
+
+    // 4) виньетка дышит: на удар раскрывается, между ударами сжимается
+    const vIn = H * (.36 - .07 * pop), vOut = H * (.80 - .05 * pop);
+    const vg = ctx.createRadialGradient(W / 2, H / 2, vIn, W / 2, H / 2, vOut);
+    vg.addColorStop(0, 'rgba(0,0,0,0)');
+    vg.addColorStop(1, 'rgba(0,0,0,' + (.5 + .16 * (1 - pop)).toFixed(2) + ')');
+    ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
+
+    // 4b) вспышка на самых мощных ударах + зерно, чтобы картинка не была стерильной
+    if (pop > 0.8) {
+      ctx.fillStyle = 'rgba(255,255,255,' + ((pop - 0.8) * 0.22).toFixed(3) + ')';
+      ctx.fillRect(0, 0, W, H);
+    }
+    drawGrain(ctx, t, 0.035 + 0.04 * (1 - pop));
+    ctx.save(); ctx.globalAlpha = .5;
+    emoji(ctx, '🏀', W / 2 - 64, H - 36, 20);
+    text(ctx, 'БАСКЕТБОЛ', W / 2 + 14, H - 36, 14, 800, C.muted, 'center', 4);
+    ctx.restore();
+  }
+
+  /* ================= ЗВУК =================
+     Музыку берём из вшитого куска (audio-clip.js) и декодируем в AudioBuffer.
+     Через <audio> + createMediaElementSource делать НЕЛЬЗЯ: если mp3 лежит
+     рядом на file:// или на другом origin, узел по правилам CORS отдаёт в граф
+     тишину — видео писалось немым. Декодированный буфер таких ограничений не
+     имеет, и заодно не надо тянуть 6.5 МБ ради 18 секунд.                    */
+  async function setupAudio() {
+    try {
+      if (!AC) AC = new (window.AudioContext || window.webkitAudioContext)();
+      if (AC.state === 'suspended') await AC.resume();
+      if (!gainNode) {
+        gainNode  = AC.createGain();
+        audioDest = AC.createMediaStreamDestination();
+        monitor   = AC.createAnalyser(); monitor.fftSize = 2048;
+        gainNode.connect(audioDest);
+        gainNode.connect(AC.destination);
+        gainNode.connect(monitor);       // чтобы поймать немую дорожку и честно об этом сказать
+      }
+      if (!audioBuf) {
+        const data = (typeof VIDEO_AUDIO_CLIP !== 'undefined') ? VIDEO_AUDIO_CLIP : null;
+        if (data) {
+          const bytes = await (await fetch(data)).arrayBuffer();
+          audioBuf = await AC.decodeAudioData(bytes);
+        } else {
+          audioBuf = await loadFullTrack();   // запасной путь: полный mp3 рядом
+        }
+        if (audioBuf) analyzeAudio(audioBuf);
+      }
+      return !!audioBuf;
+    } catch (e) { return false; }
+  }
+
+  // Запасной путь, если audio-clip.js не подключён: тянем полный трек и режем с 22-й секунды
+  async function loadFullTrack() {
+    try {
+      const bytes = await (await fetch(encodeURI(AUDIO_FILE))).arrayBuffer();
+      const full = await AC.decodeAudioData(bytes);
+      const from = Math.min(AUDIO_START, Math.max(0, full.duration - DUR));
+      const len  = Math.min(Math.floor(DUR * full.sampleRate), full.length - Math.floor(from * full.sampleRate));
+      const out  = AC.createBuffer(full.numberOfChannels, len, full.sampleRate);
+      for (let ch = 0; ch < full.numberOfChannels; ch++) {
+        out.copyToChannel(full.getChannelData(ch).subarray(Math.floor(from * full.sampleRate), Math.floor(from * full.sampleRate) + len), ch);
+      }
+      return out;
+    } catch (e) { return null; }
+  }
+
+  /* Разбор трека: громкость и удары. По ним вся картинка потом «дышит» —
+     на удар кадр вспыхивает цветом и подпрыгивает, между ударами уходит в серое. */
+  function analyzeAudio(buf) {
+    try {
+      const sr = buf.sampleRate, hop = 512;
+      const chans = [];
+      for (let c = 0; c < buf.numberOfChannels; c++) chans.push(buf.getChannelData(c));
+      const n = Math.floor(buf.length / hop);
+      const rms = new Float32Array(n);
+      for (let i = 0; i < n; i++) {
+        let s = 0;
+        const from = i * hop, to = from + hop;
+        for (let j = from; j < to; j++) {
+          let v = 0;
+          for (let c = 0; c < chans.length; c++) v += chans[c][j];
+          v /= chans.length; s += v * v;
+        }
+        rms[i] = Math.sqrt(s / hop);
+      }
+      // поток нарастаний громкости = моменты ударов
+      const flux = new Float32Array(n);
+      for (let i = 1; i < n; i++) flux[i] = Math.max(0, rms[i] - rms[i - 1]);
+      const sorted = Array.from(flux).sort((a, b) => a - b);
+      const hi = sorted[Math.floor(n * 0.97)] || 1;
+      const loud = sorted.length ? (Array.from(rms).sort((a, b) => a - b)[Math.floor(n * 0.9)] || 1) : 1;
+      // затухающий след от каждого удара — чтобы вспышка не была в один кадр
+      const pulse = new Float32Array(n);
+      const decay = 0.90;
+      for (let i = 0; i < n; i++) {
+        const hit = clamp(flux[i] / hi, 0, 1);
+        pulse[i] = Math.max(hit, i ? pulse[i - 1] * decay : 0);
+      }
+      // Нормализация «по месту»: у трека тихий вход, и в начале удары слабее.
+      // Делим на локальный максимум в окне ±1.5 с — тогда качает и на тихих кусках.
+      const win = Math.round(1.5 / (hop / sr));
+      const norm = new Float32Array(n);
+      for (let i = 0; i < n; i++) {
+        let mx = 0;
+        const from = Math.max(0, i - win), to = Math.min(n - 1, i + win);
+        for (let j = from; j <= to; j += 4) if (pulse[j] > mx) mx = pulse[j];
+        norm[i] = clamp(pulse[i] / Math.max(mx, 0.05), 0, 1);
+      }
+      const nrg = new Float32Array(n);
+      for (let i = 0; i < n; i++) nrg[i] = clamp(rms[i] / loud, 0, 1);
+      AF = { pulse: norm, nrg, step: hop / sr, n };
+    } catch (e) { AF = null; }
+  }
+
+  function sampleAF(arr, t) {
+    if (!AF || !arr) return 0;
+    const i = Math.round(t / AF.step);
+    if (i < 0 || i >= AF.n) return 0;
+    return arr[i];
+  }
+  const beatAt = t => sampleAF(AF && AF.pulse, t);   // 0..1 — удар только что был
+  const nrgAt  = t => sampleAF(AF && AF.nrg,   t);   // 0..1 — насколько сейчас громко
+
+  function startMusic() {
+    if (!audioBuf || !gainNode) return;
+    stopMusic();
+    srcNode = AC.createBufferSource();
+    srcNode.buffer = audioBuf;
+    srcNode.connect(gainNode);
+    const t = AC.currentTime;
+    gainNode.gain.cancelScheduledValues(t);
+    gainNode.gain.setValueAtTime(0.0001, t);
+    gainNode.gain.linearRampToValueAtTime(1, t + 0.35);
+    gainNode.gain.setValueAtTime(1, t + DUR - 1.2);
+    gainNode.gain.linearRampToValueAtTime(0.0001, t + DUR - 0.05);
+    srcNode.start(t);                        // буфер уже начинается с 22-й секунды трека
+  }
+
+  function stopMusic() {
+    if (srcNode) { try { srcNode.stop(); } catch (e) {} try { srcNode.disconnect(); } catch (e) {} srcNode = null; }
+  }
+
+  /* ================= ЗАПИСЬ ================= */
+  function pickMime() {
+    if (!window.MediaRecorder) return null;
+    // MP4 в приоритете: WebM от MediaRecorder пишется без длительности в
+    // заголовке, из-за чего галерея телефона и Windows-плееры показывают 00:00
+    // и часто вообще не проигрывают звуковую дорожку. MP4 таких проблем не имеет.
+    const list = ['video/mp4;codecs=avc1.42E01E,mp4a.40.2', 'video/mp4;codecs=avc1,mp4a.40.2',
+                  'video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'];
+    for (let i = 0; i < list.length; i++) {
+      try { if (MediaRecorder.isTypeSupported(list[i])) return list[i]; } catch (e) {}
+    }
+    return '';
+  }
+
+  function preloadPhotos(d) {
+    const jobs = d.players.filter(p => p.photo && !photoCache[p.photo]).map(p => new Promise(res => {
+      const img = new Image();
+      img.onload = img.onerror = () => res();
+      photoCache[p.photo] = img;
+      img.src = p.photo;
+    }));
+    return Promise.all(jobs);
+  }
+
+  /* ================= UI ================= */
+  const ui = {};
+  function cacheUI() {
+    ui.back = $('#video-backdrop'); ui.canvas = $('#video-canvas'); ui.video = $('#video-result');
+    ui.overlay = $('#video-overlay'); ui.hint = $('#video-hint'); ui.bar = $('#video-bar');
+    ui.status = $('#video-status'); ui.save = $('#video-save'); ui.again = $('#video-again');
+    ui.close = $('#video-close'); ui.title = $('#video-title');
+  }
+
+  function setProgress(p) { if (ui.bar) ui.bar.style.width = (p * 100).toFixed(1) + '%'; }
+  function setHint(txt, show) {
+    if (!ui.overlay) return;
+    ui.overlay.hidden = !show;
+    if (txt && ui.hint) ui.hint.textContent = txt;
+  }
+
+  function resetUI() {
+    setProgress(0);
+    ui.video.hidden = true; ui.canvas.hidden = false;
+    ui.save.hidden = true; ui.again.hidden = true;
+    ui.status.textContent = 'Не переключайся на другие вкладки — запись идёт в реальном времени';
+    if (blobUrl) { URL.revokeObjectURL(blobUrl); blobUrl = null; }
+    blob = null;
+  }
+
+  function close() {
+    cancelled = true; running = false;
+    stopMusic();
+    if (ui.video) { try { ui.video.pause(); } catch (e) {} }
+    if (ui.back) ui.back.hidden = true;
+  }
+
+  /* ================= ГЕНЕРАЦИЯ ================= */
+  async function generate() {
+    if (running || !source) return;
+    running = true; cancelled = false;
+    resetUI();
+
+    const d = source;
+    const ctx = ui.canvas.getContext('2d');
+    const oc = document.createElement('canvas'); oc.width = W; oc.height = H;
+    const occ = oc.getContext('2d');
+
+    setHint('Готовим кадры…', true);
+    try { if (document.fonts && document.fonts.ready) await document.fonts.ready; } catch (e) {}
+    await preloadPhotos(d);
+    drawFrame(ctx, oc, occ, d, 0);           // прогрев шрифтов и картинок
+    if (cancelled) { running = false; return; }
+
+    setHint('Загружаем музыку…', true);
+    const haveAudio = await setupAudio();
+    if (cancelled) { running = false; return; }
+
+    const mime = pickMime();
+    const canRecord = mime !== null && typeof ui.canvas.captureStream === 'function';
+
+    let rec = null;
+    const chunks = [];
+    if (canRecord) {
+      try {
+        const stream = ui.canvas.captureStream(FPS);
+        if (haveAudio && audioDest) audioDest.stream.getAudioTracks().forEach(tr => stream.addTrack(tr));
+        rec = new MediaRecorder(stream, mime
+          ? { mimeType: mime, videoBitsPerSecond: 6000000, audioBitsPerSecond: 128000 }
+          : undefined);
+        rec.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+      } catch (e) { rec = null; }
+    }
+
+    silent = false;
+    if (haveAudio) {
+      try { startMusic(); } catch (e) {}
+      // Через пару секунд смотрим, идёт ли по графу реальный сигнал. Если нет —
+      // скажем об этом сразу, а не после скачивания немого файла.
+      setTimeout(() => {
+        if (!monitor || cancelled) return;
+        const b = new Float32Array(monitor.fftSize);
+        monitor.getFloatTimeDomainData(b);
+        let peak = 0; for (let i = 0; i < b.length; i++) { const q = Math.abs(b[i]); if (q > peak) peak = q; }
+        if (peak < 0.005) silent = true;
+      }, 2000);
+    }
+
+    setHint('', false);
+    if (rec) { try { rec.start(200); } catch (e) { rec = null; } }
+    if (!rec) ui.status.textContent = 'Браузер не умеет записывать видео — показываю ролик как есть. Для скачивания открой в Chrome.';
+
+    const t0 = performance.now();
+    await new Promise(resolve => {
+      let done = false, raf = 0, wd = 0, lastDraw = t0;
+      const finishUp = () => {
+        if (done) return;
+        done = true;
+        cancelAnimationFrame(raf); clearInterval(wd);
+        resolve();
+      };
+      const tick = () => {
+        if (done) return;
+        if (cancelled) return finishUp();
+        const now = performance.now();
+        lastDraw = now;
+        const t = (now - t0) / 1000;
+        if (t >= DUR) { drawFrame(ctx, oc, occ, d, DUR - 0.001); setProgress(1); return finishUp(); }
+        drawFrame(ctx, oc, occ, d, t);
+        setProgress(t / DUR);
+        if (rec) ui.status.textContent = 'Записываю…  ' + t.toFixed(1) + ' / ' + DUR + ' с — не сворачивай вкладку';
+        else     ui.status.textContent = 'Проигрываю…  ' + t.toFixed(1) + ' / ' + DUR + ' с';
+        cancelAnimationFrame(raf);
+        raf = requestAnimationFrame(tick);
+      };
+      // Если вкладку свернули, requestAnimationFrame замирает: кадры перестают
+      // рисоваться и генерация висела бы вечно. Таймер добивает кадры сам.
+      wd = setInterval(() => {
+        if (done) return;
+        if (performance.now() - lastDraw > 400) tick();
+      }, 250);
+      raf = requestAnimationFrame(tick);
+    });
+
+    stopMusic();
+
+    if (cancelled) {
+      if (rec && rec.state !== 'inactive') { try { rec.stop(); } catch (e) {} }
+      running = false;
+      return;
+    }
+
+    if (rec) {
+      await new Promise(res => { rec.onstop = res; try { rec.stop(); } catch (e) { res(); } });
+      const type = (rec.mimeType || mime || 'video/webm').split(';')[0];
+      blob = new Blob(chunks, { type });
+      blobUrl = URL.createObjectURL(blob);
+      const ext = type.indexOf('mp4') !== -1 ? 'mp4' : 'webm';
+      const safe = (d.name || 'match').replace(/[^\wА-Яа-яЁё\- ]+/g, '').trim().replace(/\s+/g, '_') || 'match';
+      fileName = safe + '_' + new Date(d.time).toISOString().slice(0, 10) + '.' + ext;
+
+      ui.canvas.hidden = true;
+      ui.video.hidden = false;
+      ui.video.src = blobUrl;
+      ui.video.controls = true;
+      try { await ui.video.play(); } catch (e) {}
+      ui.save.hidden = false;
+      ui.status.textContent = 'Готово · ' + DUR + ' с · ' + (blob.size / 1048576).toFixed(1) + ' МБ'
+        + (!haveAudio ? ' · без звука: трек не загрузился'
+          : silent    ? ' · ⚠️ звук не записался'
+                      : ' · со звуком 🎵');
+    } else {
+      ui.status.textContent = 'Ролик показан. Скачивание в этом браузере недоступно.';
+    }
+    ui.again.hidden = false;
+    running = false;
+  }
+
+  /* ================= ПУБЛИЧНОЕ API ================= */
+  function open(src, titleTxt) {
+    cacheUI();
+    if (!ui.back) return;
+    if (!src || !src.players || !src.players.length) {
+      showAlert('В этом матче ещё нет данных для ролика', '🎬');
+      return;
+    }
+    if (!src.shots.length) {
+      showAlert('Ещё не было ни одного броска — ролик собирать не из чего', '🎬');
+      return;
+    }
+    source = src;
+    ui.title.textContent = titleTxt || 'Видео матча';
+    ui.back.hidden = false;
+    cancelled = false;
+    generate();
+  }
+
+  function save() {
+    if (!blob || !blobUrl) return;
+    const a = document.createElement('a');
+    a.href = blobUrl; a.download = fileName;
+    document.body.appendChild(a); a.click(); a.remove();
+  }
+
+  function bind() {
+    cacheUI();
+    if (!ui.back) return;
+    ui.close.addEventListener('click', close);
+    ui.back.addEventListener('click', e => { if (e.target.id === 'video-backdrop') close(); });
+    ui.save.addEventListener('click', save);
+    ui.again.addEventListener('click', () => {
+      if (running) return;
+      ui.video.hidden = true; ui.canvas.hidden = false;
+      generate();
+    });
+  }
+
+  // Отладка: нарисовать один кадр на секунде t (без записи и звука)
+  async function _frame(src, t) {
+    cacheUI();
+    ui.back.hidden = false; setHint('', false);
+    ui.video.hidden = true; ui.canvas.hidden = false;
+    try { if (document.fonts && document.fonts.ready) await document.fonts.ready; } catch (e) {}
+    await preloadPhotos(src);
+    const ctx = ui.canvas.getContext('2d');
+    const oc = document.createElement('canvas'); oc.width = W; oc.height = H;
+    drawFrame(ctx, oc, oc.getContext('2d'), src, t);
+    return true;
+  }
+
+  return { open, bind, fromMatch, fromHistory, _frame, _af: () => AF,
+           isRunning: function () { return running; } };
+})();

@@ -7,7 +7,8 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="style.css" />
+  <!-- ?v — чтобы браузер не подсовывал старую версию после обновления файлов -->
+  <link rel="stylesheet" href="style.css?v=24" />
 </head>
 <body>
   <div class="app-shell">
@@ -368,8 +369,34 @@
     <div class="modal log-modal">
       <div class="modal-text">Ход матча</div>
       <div class="events-feed log-feed" id="log-feed"></div>
+      <button class="vid-btn" id="log-video-btn" type="button">🎬 Сгенерировать видео</button>
       <div class="modal-actions">
         <button id="log-close" class="btn btn-accent">Закрыть</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ МОДАЛКА «ВИДЕО МАТЧА» ============ -->
+  <div id="video-backdrop" class="modal-backdrop" hidden>
+    <div class="modal video-modal">
+      <div class="modal-text" id="video-title">Видео матча</div>
+
+      <div class="vm-stage">
+        <canvas id="video-canvas" width="720" height="1280"></canvas>
+        <video id="video-result" playsinline loop hidden></video>
+        <div class="vm-overlay" id="video-overlay">
+          <div class="vm-spinner">🎬</div>
+          <div class="vm-hint" id="video-hint">Готовим кадры…</div>
+        </div>
+      </div>
+
+      <div class="vm-bar"><div class="vm-bar-fill" id="video-bar"></div></div>
+      <div class="vm-status" id="video-status">Не переключайся на другие вкладки — запись идёт в реальном времени</div>
+
+      <div class="modal-actions vm-actions">
+        <button id="video-close" class="btn btn-ghost">Закрыть</button>
+        <button id="video-again" class="btn btn-ghost" hidden>Заново</button>
+        <button id="video-save" class="btn btn-accent" hidden>Скачать</button>
       </div>
     </div>
   </div>
@@ -377,6 +404,7 @@
   <!-- Firebase (compat SDK) -->
   <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-database-compat.js"></script>
-  <script src="scripts.js"></script>
+  <script src="audio-clip.js?v=24"></script>
+  <script src="scripts.js?v=24"></script>
 </body>
 </html>
