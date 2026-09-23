@@ -17,3 +17,4 @@ done
 BASE="http://127.0.0.1:$PORT" node tests/match.mjs
 BASE="http://127.0.0.1:$PORT" node tests/social.mjs
 BASE="http://127.0.0.1:$PORT" node tests/lobby.mjs
+BASE="http://127.0.0.1:$PORT" node tests/video.mjs

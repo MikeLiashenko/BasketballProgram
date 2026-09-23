@@ -2620,7 +2620,8 @@ function writeHistory(mid, uid, m) {
   // Полный лог хода матча — чтобы в истории открыть его целиком
   const events = (m.events ? Object.values(m.events) : [])
     .sort((a, b) => (a.time || 0) - (b.time || 0))
-    .map(e => ({ action: e.action || '', text: e.text || '', time: e.time || 0 }));
+    // points нужен ролику: без него бросок с дальней зоны выглядел бы как обычный
+    .map(e => ({ action: e.action || '', text: e.text || '', time: e.time || 0, points: e.points || null }));
 
   const winner = m.players[m.winnerId];
   db.ref('history/' + uid + '/' + mid).set({
@@ -3178,15 +3179,16 @@ const MatchVideo = (() => {
       const p = m.players[id];
       return p ? { id, nickname: p.nickname, avatar: p.avatar || null, photo: p.photo || null,
                    color: p.color || null, hits: p.hits || 0, misses: p.misses || 0,
-                   place: p.place || null, left: !!p.left } : null;
+                   points: ptsOf(p), place: p.place || null, left: !!p.left } : null;
     }).filter(Boolean);
     const events = Object.values(m.events || {})
       .sort((a, b) => (a.time || 0) - (b.time || 0))
-      .map(e => ({ userId: e.userId || null, action: e.action || '', text: e.text || '' }));
+      .map(e => ({ userId: e.userId || null, action: e.action || '', text: e.text || '', points: e.points || null }));
     return finish({
       name: m.name || 'Матч',
       time: m.finishedAt || Date.now(),
-      goalType: m.goalType, targetHits: m.targetHits || null,
+      goalType: m.goalType, targetHits: m.targetHits || null, zones: isZones(m),
+      durationMin: m.durationMin || null, solo: !!m.solo,
       players, events, winnerId: m.winnerId || null
     });
   }
@@ -3197,6 +3199,7 @@ const MatchVideo = (() => {
     const players = (h.roster || []).map((r, i) => ({
       id: 'p' + i, nickname: r.nickname, avatar: r.avatar || null, photo: r.photo || null,
       color: r.color || null, hits: r.hits || 0, misses: r.misses || 0,
+      points: r.points != null ? r.points : (r.hits || 0),
       place: r.place || null, left: !!r.left
     }));
     const raw = Array.isArray(h.events) ? h.events : Object.values(h.events || {});
@@ -3205,27 +3208,33 @@ const MatchVideo = (() => {
     const events = raw.slice().sort((a, b) => (a.time || 0) - (b.time || 0)).map(e => {
       const txt = e.text || '';
       const owner = byLen.find(p => p.nickname && txt.indexOf(p.nickname) !== -1);
-      return { userId: owner ? owner.id : null, action: e.action || '', text: txt };
+      return { userId: owner ? owner.id : null, action: e.action || '', text: txt, points: e.points || null };
     });
     let winnerId = null;
     if (h.winnerNickname) { const w = players.find(p => p.nickname === h.winnerNickname); if (w) winnerId = w.id; }
     return finish({
       name: h.name || 'Матч', time: h.time || Date.now(),
-      goalType: h.goalType, targetHits: h.targetHits || null,
+      goalType: h.goalType, targetHits: h.targetHits || null, zones: h.shotMode === 'zones',
+      durationMin: h.durationMin || null, solo: h.result === 'solo' || !!h.solo,
       players, events, winnerId
     });
   }
 
   // Досчитать всё, что нужно ролику: порядок, броски, серии, победитель
   function finish(d) {
+    // Очки = попадания в простом режиме и 1/2/3 за зону в продвинутом
+    d.players.forEach(p => { if (p.points == null) p.points = p.hits || 0; });
     d.players.sort((a, b) => {
       if (a.place && b.place) return a.place - b.place;
       if (a.place) return -1;
       if (b.place) return 1;
-      return (b.hits || 0) - (a.hits || 0);
+      return (b.points || 0) - (a.points || 0) || (b.hits || 0) - (a.hits || 0);
     });
 
     d.shots = d.events.filter(e => e.action === 'hit' || e.action === 'miss');
+    // У старых записей очков за бросок нет — считаем попадание за одно очко
+    d.shots.forEach(s => { s.pts = s.action === 'hit' ? (s.points || 1) : 0; });
+    d.scoreLabel = d.zones ? 'ОЧКИ' : 'ПОПАЛ';
 
     const streak = {}, best = {};
     d.shots.forEach(s => {
@@ -3421,7 +3430,10 @@ const MatchVideo = (() => {
     drawHoop(ctx, W / 2, 22, .95, null, 0);
     const f = fit(ctx, (d.name || 'Матч').toUpperCase(), W - 96, 30, 19, 800);
     gtext(ctx, f.txt, W / 2, 282, f.size, 800, '#c9ecff', '#5cb4ff');
-    const mode = d.goalType === 'common' ? 'ДО ' + d.targetHits + ' ПОПАДАНИЙ' : 'СВОБОДНЫЙ';
+    let mode;
+    if (d.goalType === 'common')     mode = 'ДО ' + d.targetHits + (d.zones ? ' ОЧКОВ' : ' ПОПАДАНИЙ');
+    else if (d.goalType === 'timed') mode = (d.durationMin || '') + ' МИН';
+    else                             mode = d.solo ? 'ТРЕНИРОВКА' : 'СВОБОДНЫЙ';
     const dt = typeof formatDate === 'function' ? formatDate(d.time) : '';
     text(ctx, mode + '  ·  ' + dt, W / 2, 318, 16, 600, C.faint, 'center', 2.4);
   }
@@ -3433,18 +3445,21 @@ const MatchVideo = (() => {
     const n = d.shots.length;
     const done = n ? clamp(Math.floor((t - A0) / (A1 - A0) * n), 0, n) : 0;
     const stat = {}, statPrev = {}, flash = {};
-    d.players.forEach(p => { stat[p.id] = { hits: 0, miss: 0 }; });
+    d.players.forEach(p => { stat[p.id] = { hits: 0, miss: 0, pts: 0 }; });
     for (let i = 0; i < done; i++) {
       // снимок счёта перед последним броском — от него ведём анимацию перестановки
-      if (i === done - 1) d.players.forEach(p => { statPrev[p.id] = { hits: stat[p.id].hits, miss: stat[p.id].miss }; });
+      if (i === done - 1) d.players.forEach(p => {
+        statPrev[p.id] = { hits: stat[p.id].hits, miss: stat[p.id].miss, pts: stat[p.id].pts };
+      });
       const s = d.shots[i]; if (!s.userId || !stat[s.userId]) continue;
-      if (s.action === 'hit') stat[s.userId].hits++; else stat[s.userId].miss++;
+      if (s.action === 'hit') { stat[s.userId].hits++; stat[s.userId].pts += s.pts; }
+      else stat[s.userId].miss++;
       flash[s.userId] = { at: A0 + (i + 1) / n * (A1 - A0), hit: s.action === 'hit' };
     }
-    if (!done) d.players.forEach(p => { statPrev[p.id] = { hits: 0, miss: 0 }; });
+    if (!done) d.players.forEach(p => { statPrev[p.id] = { hits: 0, miss: 0, pts: 0 }; });
     if (t >= A1 || !n) d.players.forEach(p => {
-      statPrev[p.id] = { hits: p.hits, miss: p.misses };
-      stat[p.id] = { hits: p.hits, miss: p.misses };
+      statPrev[p.id] = { hits: p.hits, miss: p.misses, pts: p.points };
+      stat[p.id] = { hits: p.hits, miss: p.misses, pts: p.points };
     });
 
     // Высота карточки — под число игроков, по центру свободного места
@@ -3463,7 +3478,7 @@ const MatchVideo = (() => {
     ctx.strokeStyle = C.hair; ctx.beginPath();
     ctx.moveTo(x + 18, y + 92); ctx.lineTo(x + w - 18, y + 92); ctx.stroke();
     text(ctx, 'ИГРОК', x + 96,       y + 74, 13, 700, 'rgba(190,205,225,.5)', 'left', 2.4);
-    text(ctx, 'ПОПАЛ', x + w - 168,  y + 74, 13, 700, 'rgba(190,205,225,.5)', 'center', 2.4);
+    text(ctx, d.scoreLabel, x + w - 168,  y + 74, 13, 700, 'rgba(190,205,225,.5)', 'center', 2.4);
     text(ctx, 'МИМО',  x + w - 60,   y + 74, 13, 700, 'rgba(190,205,225,.5)', 'center', 2.4);
 
     // Места считаем по текущему счёту, а не по порядку ходов — то же правило,
@@ -3471,12 +3486,13 @@ const MatchVideo = (() => {
     // при равенстве — меньше промахов.
     const fin = (t >= A1 || !n);
     const rankBy = st => list0.slice().sort((a, b) => {
-      const sa = st[a.id] || { hits: 0, miss: 0 }, sb = st[b.id] || { hits: 0, miss: 0 };
+      const sa = st[a.id] || { hits: 0, miss: 0, pts: 0 }, sb = st[b.id] || { hits: 0, miss: 0, pts: 0 };
       if (fin) {
         if (a.place && b.place) return a.place - b.place;
         if (a.place) return -1;
         if (b.place) return 1;
       }
+      if (sb.pts !== sa.pts) return sb.pts - sa.pts;
       if (sb.hits !== sa.hits) return sb.hits - sa.hits;
       return sa.miss - sb.miss;
     }).reduce((mp, pl, i) => (mp[pl.id] = i, mp), {});
@@ -3504,7 +3520,7 @@ const MatchVideo = (() => {
     const list = list0.slice().sort((a, b) => posOf(a) - posOf(b));
 
     list.forEach(p => {
-      const st = stat[p.id] || { hits: 0, miss: 0 };
+      const st = stat[p.id] || { hits: 0, miss: 0, pts: 0 };
       const f = flash[p.id];
       const fk = f ? clamp(1 - (t - f.at) / .42, 0, 1) : 0;
       const pos = posOf(p);
@@ -3542,7 +3558,7 @@ const MatchVideo = (() => {
       const bump = (fk > 0 && f.hit) ? 1 + fk * .18 : 1;
       ctx.save();
       ctx.translate(x + w - 168, cy); ctx.scale(bump, bump);
-      gtext(ctx, String(st.hits), 0, 0, 34, 800, '#ffd695', '#ff8a2e');
+      gtext(ctx, String(d.zones ? st.pts : st.hits), 0, 0, 34, 800, '#ffd695', '#ff8a2e');
       ctx.restore();
       text(ctx, String(st.miss), x + w - 60, cy, 24, 700, 'rgba(255,255,255,.4)');
     });
@@ -3556,14 +3572,14 @@ const MatchVideo = (() => {
 
     const n = d.winShots.length;
     const done = n ? clamp(Math.floor((t - R0) / (R1 - R0) * n), 0, n) : 0;
-    let hits = 0, miss = 0, run = 0, best = 0, lastAt = -9, lastHit = false;
+    let hits = 0, miss = 0, pts = 0, run = 0, best = 0, lastAt = -9, lastHit = false;
     for (let i = 0; i < done; i++) {
       const s = d.winShots[i];
-      if (s.action === 'hit') { hits++; run++; if (run > best) best = run; }
+      if (s.action === 'hit') { hits++; pts += s.pts; run++; if (run > best) best = run; }
       else { miss++; run = 0; }
       lastAt = R0 + (i + 1) / n * (R1 - R0); lastHit = s.action === 'hit';
     }
-    if (t >= R1 || !n) { hits = p.hits; miss = p.misses; best = p.best; }
+    if (t >= R1 || !n) { hits = p.hits; miss = p.misses; pts = p.points; best = p.best; }
     const fk = clamp(1 - (t - lastAt) / .38, 0, 1);
 
     const x = 36, w = W - 72, y = 344, h = 736;
@@ -3590,9 +3606,10 @@ const MatchVideo = (() => {
     ctx.restore();
 
     const bump = 1 + (lastHit ? fk * .13 : 0);
-    const hw = measure(ctx, String(hits), 92, 800);
+    const score = d.zones ? pts : hits;
+    const hw = measure(ctx, String(score), 92, 800);
     ctx.save(); ctx.translate(W / 2 - 40, y + 360); ctx.scale(bump, bump);
-    gtext(ctx, String(hits), 0, 0, 92, 800, '#ffd695', '#ff8a2e');
+    gtext(ctx, String(score), 0, 0, 92, 800, '#ffd695', '#ff8a2e');
     ctx.restore();
     text(ctx, '/ ' + miss, W / 2 - 40 + hw / 2 + 20, y + 378, 30, 700, 'rgba(255,255,255,.38)', 'left');
     text(ctx, 'ПОПАДАНИЙ  ·  ПРОМАХОВ', W / 2, y + 430, 13, 700, C.faint, 'center', 3);
@@ -3709,10 +3726,11 @@ const MatchVideo = (() => {
 
     const sA = clamp((local - .25) / .4, 0, 1);
     ctx.save(); ctx.globalAlpha = sA;
-    const hw = measure(ctx, String(p.hits), 76, 800);
-    gtext(ctx, String(p.hits), W / 2 - 46, 722, 76, 800, '#ffd695', '#ff8a2e');
+    const winScore = d.zones ? p.points : p.hits;
+    const hw = measure(ctx, String(winScore), 76, 800);
+    gtext(ctx, String(winScore), W / 2 - 46, 722, 76, 800, '#ffd695', '#ff8a2e');
     text(ctx, '/ ' + p.misses, W / 2 - 46 + hw / 2 + 18, 734, 30, 700, 'rgba(255,255,255,.38)', 'left');
-    text(ctx, 'ПОПАДАНИЙ  ·  ПРОМАХОВ', W / 2, 782, 13, 700, C.faint, 'center', 3);
+    text(ctx, d.zones ? 'ОЧКОВ  ·  ПРОМАХОВ' : 'ПОПАДАНИЙ  ·  ПРОМАХОВ', W / 2, 782, 13, 700, C.faint, 'center', 3);
 
     if (p.best > 0) {
       const label = 'МАКС. СЕРИЯ  ' + p.best;
