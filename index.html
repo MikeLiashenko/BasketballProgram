@@ -262,6 +262,7 @@
       </div>
 
       <div class="turnline" id="match-turn">—</div>
+      <div class="paused-banner" id="paused-banner" hidden>⏸ Матч на паузе</div>
 
       <div class="match-clock" id="match-clock" hidden>⏳ <b id="match-clock-num">0:00</b></div>
 
@@ -296,6 +297,7 @@
       <div class="bar">
         <button class="ic stop" id="finish-btn" title="Завершить матч" hidden><svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="3.2" fill="currentColor"/></svg></button>
         <button class="ic pause" id="leave-btn" title="Выйти из матча"><svg viewBox="0 0 24 24"><rect x="7" y="5" width="4" height="14" rx="1.6" fill="currentColor"/><rect x="13" y="5" width="4" height="14" rx="1.6" fill="currentColor"/></svg></button>
+        <button class="ic pausebtn" id="pause-btn" title="Пауза" hidden><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2.2"/><rect x="9.5" y="8.5" width="2" height="7" rx="1" fill="currentColor"/><rect x="12.5" y="8.5" width="2" height="7" rx="1" fill="currentColor"/></svg></button>
         <button class="ic undo" id="undo-btn" title="Отменить последний бросок" hidden><svg viewBox="0 0 24 24"><path d="M9 7L4 12l5 5M4 12h9a6 6 0 1 1 0 12h-1" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
         <button class="shot make" id="btn-hit" disabled><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Попал</span></button>
         <button class="shot miss" id="btn-miss" disabled><svg viewBox="0 0 24 24"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round"/></svg><span>Промах</span></button>
@@ -468,6 +470,8 @@
       <div class="picker-label">Настройки</div>
       <label class="switch-row"><span>📳 Вибрация</span><input type="checkbox" id="opt-haptics" /></label>
       <label class="switch-row"><span>🔔 Уведомлять о моём ходе</span><input type="checkbox" id="opt-notify" /></label>
+
+      <button id="profile-delete" class="btn btn-danger btn-block" style="margin-top:6px">Удалить аккаунт</button>
 
       <div class="modal-actions">
         <button id="profile-cancel" class="btn btn-ghost">Отмена</button>

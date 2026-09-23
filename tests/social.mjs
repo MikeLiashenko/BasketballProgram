@@ -141,6 +141,9 @@ await step('ссылка копируется из лобби', async () => {
   await page.waitForTimeout(400);
   link = await page.evaluate(() => navigator.clipboard.readText());
   if (!/\?join=/.test(link || '')) throw new Error('в буфере: ' + link);
+  // Закрываем подтверждение, иначе его подложка перехватит следующие клики
+  if (await page.isVisible('#modal-backdrop')) await page.click('#modal-ok');
+  await page.waitForTimeout(200);
 });
 
 await step('второй игрок заходит по ссылке', async () => {
@@ -201,6 +204,101 @@ await step('ссылка на завершённый матч объясняет
   await page3.waitForSelector('#screen-menu.active', { timeout: 5000 });
   await page3.close();
   await ctx3.close();
+});
+
+console.log('\nПАУЗА И «МОИ МАТЧИ»');
+await step('создатель ставит матч на паузу', async () => {
+  await page.evaluate(() => {
+    const id = localStorage.getItem('bb_activeMatch');
+    return db.ref('matches/' + id + '/players/u2').update({ status: 'joined', joinedAt: Date.now() });
+  });
+  await page.waitForTimeout(1200);
+  await page.click('#start-btn');
+  await page.waitForSelector('#screen-match.active');
+
+  if (await page.isHidden('#pause-btn')) throw new Error('кнопка паузы скрыта у создателя');
+  await page.click('#pause-btn');
+  await page.waitForTimeout(400);
+  if (await page.isHidden('#paused-banner')) throw new Error('плашка паузы не показана');
+  if (!(await page.isDisabled('#btn-hit'))) throw new Error('броски доступны на паузе');
+  const m = await page.evaluate(() => window.__DB.matches[localStorage.getItem('bb_activeMatch')]);
+  if (!m.pausedAt) throw new Error('pausedAt не проставлен');
+});
+
+await step('бросок на паузе не проходит', async () => {
+  const before = await page.evaluate(() => {
+    const m = window.__DB.matches[localStorage.getItem('bb_activeMatch')];
+    return m.players[m.creatorId].hits;
+  });
+  await page.evaluate(() => recordShot('hit', 1));   // в обход отключённой кнопки
+  await page.waitForTimeout(400);
+  const after = await page.evaluate(() => {
+    const m = window.__DB.matches[localStorage.getItem('bb_activeMatch')];
+    return m.players[m.creatorId].hits;
+  });
+  if (after !== before) throw new Error('бросок засчитан на паузе');
+});
+
+await step('снятие паузы возвращает игроку его секунды', async () => {
+  const before = await page.evaluate(() => {
+    const m = window.__DB.matches[localStorage.getItem('bb_activeMatch')];
+    return { turnStartedAt: m.turnStartedAt, pausedAt: m.pausedAt };
+  });
+  await page.waitForTimeout(700);
+  await page.click('#pause-btn');
+  await page.waitForTimeout(400);
+  const after = await page.evaluate(() => {
+    const m = window.__DB.matches[localStorage.getItem('bb_activeMatch')];
+    return { turnStartedAt: m.turnStartedAt, pausedAt: m.pausedAt || null };
+  });
+  if (after.pausedAt) throw new Error('пауза не снята');
+  if (after.turnStartedAt <= before.turnStartedAt) throw new Error('начало хода не сдвинулось вперёд');
+  if (await page.isVisible('#paused-banner')) throw new Error('плашка осталась');
+  if (await page.isDisabled('#btn-hit')) throw new Error('броски не разблокированы');
+});
+
+await step('«Мои матчи» показывают счёт и чей ход', async () => {
+  await page.click('#btn-hit');
+  await page.waitForTimeout(300);
+  await page.evaluate(() => goMenu());
+  await page.waitForTimeout(200);
+  await page.click('#mymatches-btn');
+  await page.waitForSelector('#screen-mymatches.active');
+  await page.waitForTimeout(600);
+  const card = await page.evaluate(() => {
+    // .history-card используется и на экране истории — берём строго из «Моих матчей»
+    const c = document.querySelector('#mymatches-list .history-card');
+    return c ? { cls: c.className, badges: c.querySelector('.mm-badges').textContent,
+                 score: (c.querySelector('.mm-score') || {}).textContent || '' } : null;
+  });
+  if (!card) throw new Error('нет карточек');
+  if (!/твой ход/.test(card.badges)) throw new Error('бейдж хода: ' + card.badges);
+  if (!/my-turn/.test(card.cls)) throw new Error('карточка не подсвечена');
+  if (!/Миша/.test(card.score)) throw new Error('счёт не показан: ' + card.score);
+});
+
+console.log('\nУДАЛЕНИЕ АККАУНТА');
+await step('аккаунт и его данные удаляются', async () => {
+  await page.evaluate(() => goMenu());
+  await page.waitForTimeout(300);
+  const uid = await page.evaluate(() => localStorage.getItem('bb_userId'));
+  await page.click('#menu-avatar');
+  await page.waitForTimeout(200);
+  await page.click('#profile-delete');
+  await page.waitForTimeout(200);
+  await page.click('#modal-ok');
+  await page.waitForTimeout(200);
+  await page.click('#modal-ok');
+  await page.waitForSelector('#screen-login.active', { timeout: 6000 });
+  await page.waitForTimeout(400);
+  const left = await page.evaluate(u => ({
+    user: !!(window.__DB.users || {})[u],
+    history: !!(window.__DB.history || {})[u],
+    index: !!(window.__DB.userMatches || {})[u],
+    ls: localStorage.getItem('bb_userId')
+  }), uid);
+  if (left.user || left.history || left.index) throw new Error('осталось в базе: ' + JSON.stringify(left));
+  if (left.ls) throw new Error('сессия не очищена');
 });
 
 console.log('\n--- ОШИБКИ ---');

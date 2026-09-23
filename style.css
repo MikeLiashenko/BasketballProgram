@@ -749,3 +749,34 @@ input[type="time"]::-webkit-calendar-picker-indicator { filter: invert(.7); curs
 /* Сообщение об ошибке внутри модалки профиля прижато к полю ника */
 #profile-error:not(:empty) { margin: 6px 0 2px; }
 #profile-nick-input { text-align: center; }
+
+/* ================================================================
+   ПАУЗА МАТЧА
+   ================================================================ */
+#screen-match .paused-banner {
+  position: relative; z-index: 3; flex: none; margin: 0 auto 8px; padding: 6px 18px;
+  border-radius: 20px; background: rgba(255,211,107,.12); border: 1px solid rgba(255,211,107,.4);
+  color: var(--gold); font-size: 12.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+  animation: pausePulse 1.8s ease-in-out infinite;
+}
+@keyframes pausePulse { 0%,100% { opacity: 1; } 50% { opacity: .6; } }
+/* На паузе табло приглушается — видно, что игра остановлена */
+#screen-match.is-paused .board,
+#screen-match.is-paused .hoop-zone { opacity: .5; transition: opacity .3s var(--ease); }
+#screen-match .ic.pausebtn { color: var(--gold); }
+#screen-match .ic.pausebtn.on { background: rgba(255,211,107,.18); border-color: rgba(255,211,107,.5); }
+
+/* ================================================================
+   МОИ МАТЧИ: СЧЁТ И ЧЕЙ ХОД
+   ================================================================ */
+.mm-score { font-size: 12.5px; color: var(--muted); margin-top: 7px; line-height: 1.5; }
+.mm-score b { color: var(--accent-2); font-variant-numeric: tabular-nums; }
+.mm-badge.turn { background: rgba(74,222,128,.16); border: 1px solid rgba(74,222,128,.45); color: var(--green); }
+.mm-badge.wait { background: var(--glass); border: 1px solid var(--hairline); color: var(--muted); }
+/* Матч, где ждут твоего броска, подсвечен и стоит первым в списке */
+.history-card.my-turn { border-color: rgba(74,222,128,.38); box-shadow: 0 0 0 1px rgba(74,222,128,.12), var(--edge); }
+
+/* Подтверждения и сообщения всегда поверх остальных модалок: профиль, лог и
+   видео идут в разметке ниже, поэтому при равном z-index они перекрывали
+   диалог, и до его кнопок нельзя было дотянуться. */
+#modal-backdrop { z-index: 60; }

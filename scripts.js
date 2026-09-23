@@ -283,6 +283,17 @@ const Notify = (() => {
       localStorage.setItem(LS.notify, on ? '1' : '0');
       return on;
     },
+    // Позвали в матч, пока вкладка свёрнута
+    invite(fromNick) {
+      if (!document.hidden || !this.isOn()) return;
+      try {
+        const n = new Notification('🏀 Тебя зовут в матч', {
+          body: fromNick ? fromNick + ' ждёт тебя' : 'Пришло новое приглашение',
+          tag: 'bb-invite', renotify: true, icon: 'icon.svg'
+        });
+        n.onclick = () => { window.focus(); n.close(); };
+      } catch (e) {}
+    },
     // Вкладка активна — пользователь и так всё видит, не мешаем
     turn(matchName) {
       if (!document.hidden) return;
@@ -793,6 +804,7 @@ function bindEvents() {
   $('#finish-btn').addEventListener('click', finishMatch);
   $('#leave-btn').addEventListener('click', leaveMatch);
   $('#undo-btn').addEventListener('click', undoShot);
+  $('#pause-btn').addEventListener('click', togglePause);
   $$('#zones-bar .zone').forEach(b => b.addEventListener('click', () => recordShot('hit', +b.dataset.pts)));
 
   // --- Матч: горячие клавиши на десктопе ---
@@ -825,6 +837,7 @@ function bindEvents() {
   // --- Профиль (аватар/цвет) ---
   $('#menu-avatar').addEventListener('click', openProfile);
   $('#profile-save').addEventListener('click', saveProfile);
+  $('#profile-delete').addEventListener('click', deleteAccount);
   $('#opt-haptics').addEventListener('change', e => { Haptics.set(e.target.checked); if (e.target.checked) Haptics.tap(); });
   $('#opt-notify').addEventListener('change', async e => {
     const ok = await Notify.set(e.target.checked);
@@ -1062,6 +1075,62 @@ async function logout() {
   showScreen('screen-login');
 }
 
+/* ---------- Удаление аккаунта ---------- */
+/* Сносим то, что принадлежит человеку: сам аккаунт, его историю, приглашения
+   и индекс матчей. Записи в уже сыгранных матчах остаются — это снимок игры,
+   и без них у соперников развалились бы их собственные итоги. */
+async function deleteAccount() {
+  if (!state.userId) return;
+  if (!await showConfirm('Удалить аккаунт? Статистика и история пропадут навсегда.', 'Удалить', '⚠️')) return;
+  if (!await showConfirm('Точно? Это нельзя отменить.', 'Да, удалить', '🗑️')) return;
+
+  const uid = state.userId;
+  try {
+    // Из своих незавершённых матчей выходим, чтобы никого не заморозить на своём ходу
+    const idxSnap = await db.ref('userMatches/' + uid).get();
+    const ids = Object.keys(idxSnap.val() || {});
+    for (const id of ids) {
+      await db.ref('matches/' + id).transaction(m => {
+        if (!m || !m.players || !m.players[uid] || m.status === 'finished') return m;
+        m.players[uid].left = true;
+        m.players[uid].status = 'left';
+        if (m.status === 'active') {
+          const order = m.turnOrder || [];
+          const playing = order.filter(u => m.players[u] && !m.players[u].finished && !m.players[u].left).length;
+          if (playing <= 1) return closeMatch(m, serverNow());
+          if (order[m.currentTurnIndex] === uid) {
+            const next = findNextTurn(m, m.currentTurnIndex);
+            if (next !== -1) { m.currentTurnIndex = next; m.turnStartedAt = serverNow(); }
+          }
+        }
+        return m;
+      });
+    }
+
+    await db.ref().update({
+      ['users/' + uid]: null,
+      ['history/' + uid]: null,
+      ['invites/' + uid]: null,
+      ['userMatches/' + uid]: null
+    });
+  } catch (e) {
+    showAlert('Не удалось удалить — проверь связь', '⚠️');
+    return;
+  }
+
+  $('#profile-backdrop').hidden = true;
+  stopMenuWatch();
+  stopMatchWatch();
+  stopTurnTimer();
+  stopLobbyTimer();
+  clearSession();
+  state.userId = null; state.nickname = null; state.currentMatchId = null; state.stats = null;
+  setAuthMode('login');
+  $('#login-nick').value = ''; $('#login-pin').value = '';
+  showScreen('screen-login');
+  showAlert('Аккаунт удалён', '👋');
+}
+
 /* ---------- Звук: переключатель ---------- */
 function updateSoundIcon() {
   $('#sound-btn').textContent = Sound.isMuted() ? '🔇' : '🔊';
@@ -1121,8 +1190,13 @@ function renderInvites(obj) {
   const entries = obj ? Object.entries(obj) : [];
   empty.style.display = entries.length ? 'none' : 'block';
 
-  // Звук при появлении нового приглашения
-  if (prevInviteCount >= 0 && entries.length > prevInviteCount) Sound.notify();
+  // Звук и уведомление при появлении нового приглашения
+  if (prevInviteCount >= 0 && entries.length > prevInviteCount) {
+    Sound.notify();
+    Haptics.turn();
+    const newest = entries.map(([, inv]) => inv).sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))[0];
+    Notify.invite(newest && newest.creatorNickname);
+  }
   prevInviteCount = entries.length;
 
   entries.forEach(([matchId, inv]) => {
@@ -1693,7 +1767,7 @@ function renderMatch(m) {
   }
 
   // Очередь только что дошла до меня — подсказываем, даже если вкладка свёрнута
-  if (isMyTurn && prevTurnUid !== state.userId) { Haptics.turn(); Notify.turn(m.name); }
+  if (isMyTurn && !m.pausedAt && prevTurnUid !== state.userId) { Haptics.turn(); Notify.turn(m.name); }
   prevTurnUid = activeId;
 
   setupTurnTimer(m);
@@ -1784,14 +1858,22 @@ function renderMatch(m) {
 
   // Кнопки броска — только тому, кто вправе отмечать
   const activePlayer = m.players[activeId];
-  const canShoot = iAmScorer && activePlayer && !activePlayer.finished && !activePlayer.left;
+  const paused = !!m.pausedAt;
+  const canShoot = iAmScorer && !paused && activePlayer && !activePlayer.finished && !activePlayer.left;
+  $('#paused-banner').hidden = !paused;
+  $('#screen-match').classList.toggle('is-paused', paused);
+  const pauseBtn = $('#pause-btn');
+  pauseBtn.hidden = !isCreator;
+  pauseBtn.classList.toggle('on', paused);
+  pauseBtn.title = paused ? 'Продолжить' : 'Пауза';
   $('#zones-bar').hidden = !zones;
   $('#btn-hit').hidden = zones;                 // в зонах роль «Попал» играют кнопки +1/+2/+3
   $('#btn-hit').disabled = !canShoot;
   $('#btn-miss').disabled = !canShoot;
   $$('#zones-bar .zone').forEach(b => { b.disabled = !canShoot; });
   $('#finish-btn').hidden = !isCreator;         // ⏹ Завершить — только создателю; ⏸ Выйти — всем
-  $('#undo-btn').hidden = !canUndo(m);
+  $('#undo-btn').hidden = paused || !canUndo(m);
+  $$('.rx-btn').forEach(b => { b.disabled = paused; });
 }
 
 /* Записать бросок — в транзакции (защита от гонок).
@@ -1812,10 +1894,12 @@ function recordShot(result, points) {
 
   let raced = false;   // ход сменился под ногами — транзакция намеренно отменена
   let expired = false; // в матче «на время» время вышло, пока клик летел
+  let paused = false;  // создатель поставил паузу, пока клик летел
 
   const p1 = ref.transaction(m => {
-    raced = false; expired = false;
+    raced = false; expired = false; paused = false;
     if (!m || m.status !== 'active') return m;
+    if (m.pausedAt) { paused = true; return m; }
 
     // Матч «на время»: срок вышел — бросок не засчитываем, закрываем матч
     if (m.endsAt && now >= m.endsAt) { expired = true; return closeMatch(m, now); }
@@ -1895,6 +1979,7 @@ function recordShot(result, points) {
   });
 
   p1.then(res => {
+    if (paused)  { popMatch('Матч на паузе', 'warn'); return; }
     if (expired) { popMatch('Время вышло', 'warn'); return; }
     if (raced || !res.committed) popMatch('Ход сменился', 'warn');
   }).catch(() => { popMatch('Не отправилось', 'warn'); });
@@ -1969,6 +2054,33 @@ async function undoShot() {
   else if (res.committed) { Sound.click(); Haptics.tap(); }
 }
 
+/* ---------- Пауза ---------- */
+/* Игра идёт вживую: мяч укатился, кто-то отошёл. На паузе замирают и таймер
+   хода, и часы матча — при снятии оба сдвигаются на длительность простоя,
+   чтобы никто не потерял свои секунды. */
+async function togglePause() {
+  const mid = state.currentMatchId;
+  if (!mid) return;
+  await db.ref('matches/' + mid).transaction(m => {
+    if (!m || m.status !== 'active') return m;
+    if (m.creatorId !== state.userId) return;      // паузу ставит только создатель
+    if (!m.events) m.events = {};
+    const k = db.ref().push().key;
+
+    if (m.pausedAt) {
+      const delta = serverNow() - m.pausedAt;
+      if (m.turnStartedAt) m.turnStartedAt += delta;
+      if (m.endsAt)        m.endsAt += delta;
+      m.pausedAt = null;
+      m.events[k] = { time: serverNow(), userId: state.userId, action: 'start', text: '▶️ Игра продолжается' };
+    } else {
+      m.pausedAt = serverNow();
+      m.events[k] = { time: serverNow(), userId: state.userId, action: 'leave', text: '⏸ Матч поставлен на паузу' };
+    }
+    return m;
+  });
+}
+
 /* ---------- Матч «на время» ---------- */
 /* Время может выйти, когда никто не бросает, поэтому каждый клиент тикает сам
    и первый заметивший закрывает матч транзакцией. Остальные её не продублируют:
@@ -1981,6 +2093,7 @@ function setupMatchClock(m) {
   const wrap = $('#match-clock');
   if (!wrap) return;
   if (m.status !== 'active' || !m.endsAt) { stopMatchClock(); wrap.hidden = true; return; }
+  if (m.pausedAt) { stopMatchClock(); return; }   // на паузе часы замирают на месте
   wrap.hidden = false;
 
   const mid = state.currentMatchId, endsAt = m.endsAt;
@@ -1998,7 +2111,7 @@ function setupMatchClock(m) {
 
 function expireMatch(mid, expectedEndsAt) {
   db.ref('matches/' + mid).transaction(m => {
-    if (!m || m.status !== 'active') return m;
+    if (!m || m.status !== 'active' || m.pausedAt) return m;
     if (m.endsAt !== expectedEndsAt) return m;       // матч успели изменить
     if (serverNow() < m.endsAt) return m;            // страховка от рассинхрона часов
     if (!m.events) m.events = {};
@@ -2083,7 +2196,7 @@ function stopTurnTimer() {
 
 function setupTurnTimer(m) {
   const wrap = $('#turn-timer');
-  const on = m.status === 'active' && m.turnSeconds > 0 && m.turnStartedAt;
+  const on = m.status === 'active' && !m.pausedAt && m.turnSeconds > 0 && m.turnStartedAt;
   if (!on) { stopTurnTimer(); if (wrap) wrap.hidden = true; timerState.startedAt = null; return; }
   wrap.hidden = false;
 
@@ -2121,7 +2234,7 @@ function setupTurnTimer(m) {
 // Время хода вышло → авто-промах активному игроку (защищено по turnStartedAt, срабатывает один раз)
 function expireTurn(mid, expectedStartedAt, seconds) {
   db.ref('matches/' + mid).transaction(m => {
-    if (!m || m.status !== 'active') return m;
+    if (!m || m.status !== 'active' || m.pausedAt) return m;
     if (m.turnStartedAt !== expectedStartedAt) return m;                 // ход уже сменился
     if ((serverNow() - m.turnStartedAt) < seconds * 1000 - 400) return m; // ещё не истёк (страховка от рассинхрона)
 
@@ -2579,7 +2692,10 @@ async function openMyMatches() {
   });
   if (Object.keys(stale).length) db.ref().update(stale);
 
-  mine.sort((a, b) => (b.m.createdAt || 0) - (a.m.createdAt || 0));
+  // Сначала те, где ход за тобой, потом свежие
+  const myTurnIn = ({ m }) => m.status === 'active' && !m.pausedAt &&
+    (m.turnOrder || [])[m.currentTurnIndex] === state.userId ? 1 : 0;
+  mine.sort((a, b) => myTurnIn(b) - myTurnIn(a) || (b.m.createdAt || 0) - (a.m.createdAt || 0));
   renderMyMatches(mine);
 }
 
@@ -2597,17 +2713,34 @@ function renderMyMatches(items) {
     const roleBadge = isCreator ? '<span class="mm-badge creator">ваш</span>' : '';
     const leftBadge = me.left ? '<span class="mm-badge left">вы вышли</span>' : '';
     const count = Object.values(m.players).filter(p => p.status === 'joined').length;
-    const modeTxt = m.goalType === 'common' ? `🎯 до ${m.targetHits}` : '🔥 свободный';
+    let modeTxt;
+    if (m.goalType === 'common')     modeTxt = `🎯 до ${m.targetHits}`;
+    else if (m.goalType === 'timed') modeTxt = `⏳ ${m.durationMin} мин`;
+    else                             modeTxt = '🔥 свободный';
+    if (isZones(m)) modeTxt += ' · 🎖️ зоны';
     const timeTxt = m.startAt ? ` · 🕐 ${fmtClock(m.startAt)}` : '';
 
+    // Чей ход — главное, что хочется увидеть в списке идущих матчей
+    const activeUid = !isLobby && (m.turnOrder || [])[m.currentTurnIndex];
+    const myTurn = activeUid === state.userId && !me.left && !me.finished;
+    const turnBadge = m.pausedAt ? '<span class="mm-badge left">пауза</span>'
+      : myTurn ? '<span class="mm-badge turn">твой ход</span>'
+      : activeUid ? `<span class="mm-badge wait">ходит ${escapeHtml((m.players[activeUid] || {}).nickname || '—')}</span>` : '';
+
+    // Текущий счёт — коротко, в порядке табло
+    const scoreTxt = isLobby ? '' : (m.turnOrder || []).map(uid => m.players[uid]).filter(Boolean)
+      .sort(cmpPlayers).slice(0, 4)
+      .map(p => `${escapeHtml(p.nickname)} <b>${ptsOf(p)}</b>`).join(' · ');
+
     const card = document.createElement('div');
-    card.className = 'history-card';
+    card.className = 'history-card' + (myTurn ? ' my-turn' : '');
     card.innerHTML = `
       <div class="hc-top">
         <span class="hc-result">${escapeHtml(m.name || 'Матч')}</span>
-        <span class="mm-badges">${statusBadge}${roleBadge}${leftBadge}</span>
+        <span class="mm-badges">${statusBadge}${roleBadge}${leftBadge}${turnBadge}</span>
       </div>
       <div class="hc-mode">${modeTxt} · 👥 ${count}${timeTxt}</div>
+      ${scoreTxt ? `<div class="mm-score">${scoreTxt}</div>` : ''}
       <div class="mm-actions"></div>`;
     const actions = card.querySelector('.mm-actions');
 
