@@ -213,6 +213,10 @@
             <input id="match-time" class="field" type="time" autocomplete="off" />
           </div>
           <h2 class="section-title" style="margin-top:20px">Кого позвать</h2>
+          <div id="recent-wrap" class="recent-wrap" hidden>
+            <div class="picker-label">Недавние соперники</div>
+            <div id="recent-chips" class="recent-chips"></div>
+          </div>
           <input id="user-search" class="field search-input" type="text" placeholder="🔍  Поиск по нику..." autocomplete="off" />
           <div id="user-list" class="user-list"></div>
           <div class="wizard-nav">
@@ -234,7 +238,10 @@
       </main>
       <footer class="menu-footer stack">
         <button id="start-btn" class="btn btn-accent btn-big" disabled>Начать матч</button>
-        <button id="lobby-leave-btn" class="btn btn-ghost">Выйти</button>
+        <div class="match-actions">
+          <button id="lobby-link-btn" class="btn btn-ghost">🔗 Позвать по ссылке</button>
+          <button id="lobby-leave-btn" class="btn btn-ghost">Выйти</button>
+        </div>
       </footer>
     </section>
 
@@ -334,12 +341,34 @@
         <button class="btn-icon ghost" data-nav="menu">‹</button>
         <div class="topbar-title">История матчей</div>
         <div class="topbar-spacer"></div>
+        <button id="h2h-btn" class="btn-icon ghost" title="Личные встречи">⚔️</button>
       </header>
+      <div class="segment wide" id="seg-history">
+        <button type="button" class="seg-btn active" data-hfilter="all">Все</button>
+        <button type="button" class="seg-btn" data-hfilter="win">Победы</button>
+        <button type="button" class="seg-btn" data-hfilter="lose">Поражения</button>
+      </div>
       <main class="menu-body">
         <div id="history-list" class="history-list"></div>
         <div id="history-empty" class="empty">
           <div class="empty-emoji">📜</div>
           <div>Ты ещё не сыграл ни одного матча</div>
+        </div>
+      </main>
+    </section>
+
+    <!-- ============ ЭКРАН 10: ЛИЧНЫЕ ВСТРЕЧИ ============ -->
+    <section id="screen-h2h" class="screen">
+      <header class="topbar">
+        <button class="btn-icon ghost" data-nav="history">‹</button>
+        <div class="topbar-title">Личные встречи</div>
+        <div class="topbar-spacer"></div>
+      </header>
+      <main class="menu-body">
+        <div id="h2h-list" class="rating-list"></div>
+        <div id="h2h-empty" class="empty">
+          <div class="empty-emoji">⚔️</div>
+          <div>Сыграй с кем-нибудь — тут появится личный счёт</div>
         </div>
       </main>
     </section>

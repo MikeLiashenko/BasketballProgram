@@ -49,6 +49,10 @@ let lobbyMatch = null;      // последнее состояние матча 
 let lobbyIntervalId = null; // тик обратного отсчёта в лобби
 let editingMatchId = null;  // id матча, открытого в модалке редактирования
 let lastRenderedMatch = null; // последнее состояние матча, показанное на экране (для проверки хода в момент клика)
+let pendingJoin = null;       // matchId из ссылки ?join=, ждёт входа в аккаунт
+let recentOpponents = [];     // недавние соперники для быстрого выбора в мастере
+let historyCache = [];        // выгруженная история — по ней строятся фильтр и личные встречи
+let historyFilter = 'all';    // 'all' | 'win' | 'lose'
 let logVideoSource = null;    // запись истории, открытая в модалке лога (для кнопки «Сгенерировать видео»)
 let clockIntervalId = null;   // тик обратного отсчёта в матче «на время»
 let lastReactionTime = null;  // чтобы не проигрывать реакции, прилетевшие до входа
@@ -540,6 +544,14 @@ document.addEventListener('DOMContentLoaded', init);
 function init() {
   bindEvents();
   setupPWA();
+
+  // Ссылку-приглашение читаем один раз и сразу убираем из адреса,
+  // иначе обновление страницы снова потащит в тот же матч.
+  const joinId = new URLSearchParams(location.search).get('join');
+  if (joinId) {
+    pendingJoin = joinId;
+    try { history.replaceState(null, '', location.pathname); } catch (e) {}
+  }
   updateSoundIcon();
   setupRegPickers();
   const uid = localStorage.getItem(LS.userId);
@@ -579,6 +591,11 @@ async function resumeUser() {
 
 // Если был активный матч — вернуться в него, иначе меню
 async function resumeOrMenu() {
+  // Приглашение по ссылке важнее незакрытого матча — человек шёл именно сюда
+  if (pendingJoin) {
+    const id = pendingJoin; pendingJoin = null;
+    if (await joinByLink(id)) return;
+  }
   const activeId = localStorage.getItem(LS.activeMatch);
   if (activeId) {
     const snap = await db.ref('matches/' + activeId).get();
@@ -613,6 +630,15 @@ function bindEvents() {
   $('#create-btn').addEventListener('click', openWizard);
   $('#logout-btn').addEventListener('click', logout);
   $('#history-btn').addEventListener('click', openHistory);
+  $('#h2h-btn').addEventListener('click', openH2H);
+
+  // --- История: фильтр ---
+  $$('#seg-history .seg-btn').forEach(b => b.addEventListener('click', () => {
+    $$('#seg-history .seg-btn').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    historyFilter = b.dataset.hfilter;
+    renderHistory();
+  }));
   $('#mymatches-btn').addEventListener('click', openMyMatches);
   $('#rating-btn').addEventListener('click', openRating);
   $('#sound-btn').addEventListener('click', toggleSound);
@@ -632,8 +658,12 @@ function bindEvents() {
     if (e.target.closest('.btn, .btn-icon, .choice-card, .user-row, .auth-tab')) Sound.click();
   });
 
-  // --- Навигация "назад в меню" ---
-  $$('[data-nav="menu"]').forEach(b => b.addEventListener('click', goMenu));
+  // --- Навигация «назад» ---
+  const NAV = { menu: goMenu, history: openHistory };
+  $$('[data-nav]').forEach(b => b.addEventListener('click', () => {
+    const go = NAV[b.dataset.nav];
+    if (go) go();
+  }));
 
   // --- Мастер: переходы между шагами ---
   $$('[data-goto]').forEach(b => b.addEventListener('click', () => {
@@ -752,6 +782,7 @@ function bindEvents() {
   // --- Лобби ---
   $('#start-btn').addEventListener('click', startMatch);
   $('#lobby-leave-btn').addEventListener('click', leaveLobby);
+  $('#lobby-link-btn').addEventListener('click', shareMatchLink);
 
   // --- Матч ---
   $('#btn-hit').addEventListener('click', () => recordShot('hit', 1));
@@ -975,6 +1006,11 @@ function loginLocal(userId, nick) {
   state.nickname = nick;
   setupPresence();
   $('#login-pin').value = '';
+  if (pendingJoin) {
+    const id = pendingJoin; pendingJoin = null;
+    joinByLink(id).then(ok => { if (!ok) goMenu(); });
+    return;
+  }
   goMenu();
 }
 
@@ -1157,6 +1193,7 @@ function openWizard() {
   goToStep(1);
   showScreen('screen-create');
   loadUsersForWizard();
+  loadRecentOpponents();
 }
 
 // В продвинутом режиме цель считается в очках, а не в попаданиях
@@ -1176,6 +1213,53 @@ function loadUsersForWizard() {
   db.ref('users').get().then(snap => {
     usersOnceCache = snap.val() || {};
     renderUserList();
+  });
+}
+
+/* Недавние соперники: быстрый выбор тех, с кем уже играл, без поиска по нику. */
+async function loadRecentOpponents() {
+  const wrap = $('#recent-wrap');
+  if (!wrap) return;
+  wrap.hidden = true;
+  try {
+    if (!historyCache.length) {
+      const snap = await db.ref('history/' + state.userId).get();
+      historyCache = Object.entries(snap.val() || {}).map(([_k, h]) => ({ ...h, _k }))
+        .sort((a, b) => (b.time || 0) - (a.time || 0));
+    }
+  } catch (e) { return; }
+
+  const seen = {};
+  historyCache.forEach(h => {
+    (h.roster || []).forEach(r => {
+      // Без userId позвать не получится — такие записи пропускаем
+      if (!r.userId || r.userId === state.userId || seen[r.userId]) return;
+      seen[r.userId] = { nickname: r.nickname, avatar: r.avatar || null, color: r.color || null, photo: r.photo || null };
+    });
+  });
+  recentOpponents = Object.entries(seen).slice(0, 8).map(([uid, u]) => ({ uid, ...u }));
+  renderRecentChips();
+}
+
+function renderRecentChips() {
+  const wrap = $('#recent-wrap'), box = $('#recent-chips');
+  if (!wrap || !box) return;
+  // Показываем только тех, кто ещё есть в базе — удалённые аккаунты звать некуда
+  const avail = recentOpponents.filter(o => usersOnceCache[o.uid]);
+  wrap.hidden = !avail.length;
+  box.innerHTML = '';
+  avail.forEach(o => {
+    const on = !!state.wizard.selected[o.uid];
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'recent-chip' + (on ? ' sel' : '');
+    chip.innerHTML = `${miniAvatar(o, true)}<span>${escapeHtml(o.nickname)}</span>`;
+    chip.addEventListener('click', () => {
+      if (state.wizard.selected[o.uid]) delete state.wizard.selected[o.uid];
+      else state.wizard.selected[o.uid] = { nickname: o.nickname, avatar: o.avatar, color: o.color, photo: o.photo };
+      renderUserList();
+    });
+    box.appendChild(chip);
   });
 }
 
@@ -1207,6 +1291,7 @@ function renderUserList() {
   });
 
   if (!list.children.length) list.innerHTML = '<div class="empty">Никого не найдено</div>';
+  renderRecentChips();   // подсветка чипов идёт за выбором в списке
 }
 
 async function createMatch() {
@@ -1272,6 +1357,77 @@ async function createMatch() {
   await db.ref().update(updates);
 
   enterMatch(matchId);
+}
+
+/* ---------- Приглашение по ссылке ---------- */
+/* Ссылку можно кинуть в любой мессенджер: открывший её попадёт прямо в матч,
+   даже если создатель не звал его из списка игроков. */
+function matchLink(matchId) {
+  return location.origin + location.pathname + '?join=' + encodeURIComponent(matchId);
+}
+
+async function shareMatchLink() {
+  const mid = state.currentMatchId;
+  if (!mid) return;
+  const url = matchLink(mid);
+  const name = (lobbyMatch && lobbyMatch.name) || 'матч';
+  try {
+    if (navigator.share) { await navigator.share({ title: 'Баскетбол', text: `Заходи в ${name}!`, url }); return; }
+    await navigator.clipboard.writeText(url);
+    showAlert('Ссылка скопирована — отправь её друзьям', '🔗');
+  } catch (e) {
+    if (e && e.name === 'AbortError') return;
+    // clipboard недоступен на http без сертификата — показываем ссылку целиком
+    showAlert(url, '🔗');
+  }
+}
+
+// Вход по ссылке: дописываемся в матч, если он ещё идёт
+async function joinByLink(matchId) {
+  let snap;
+  try { snap = await db.ref('matches/' + matchId).get(); }
+  catch (e) { showAlert('Не удалось открыть матч', '⚠️'); return false; }
+
+  const m = snap.val();
+  if (!m)                      { showAlert('Матч не найден — возможно, его удалили', '🔍'); return false; }
+  if (m.status === 'finished') { showAlert('Этот матч уже завершён', '🏁'); return false; }
+
+  const me = m.players && m.players[state.userId];
+  // Уже в составе и не выходил — просто заходим
+  if (me && !me.left && me.status === 'joined') { enterMatch(matchId); return true; }
+
+  await db.ref('matches/' + matchId).transaction(mm => {
+    if (!mm || mm.status === 'finished') return mm;
+    if (!mm.players) mm.players = {};
+    const p = mm.players[state.userId] || { hits: 0, misses: 0, points: 0, best: 0 };
+    p.nickname = state.nickname;
+    p.avatar = state.avatar || null;
+    p.color  = state.color  || null;
+    p.photo  = state.photo  || null;
+    p.status = 'joined';
+    p.joinedAt = serverNow();
+    p.left = false;
+    p.finished = false;
+    p.streak = 0;
+    mm.players[state.userId] = p;
+
+    // В идущий матч надо ещё встать в очередь бросков
+    if (mm.status === 'active') {
+      mm.turnOrder = mm.turnOrder || [];
+      if (mm.turnOrder.indexOf(state.userId) === -1) mm.turnOrder.push(state.userId);
+      if (!mm.events) mm.events = {};
+      const k = db.ref().push().key;
+      mm.events[k] = { time: serverNow(), userId: state.userId, action: 'join', text: `${state.nickname} присоединился по ссылке` };
+    }
+    return mm;
+  });
+
+  await db.ref().update({
+    ['userMatches/' + state.userId + '/' + matchId]: true,
+    ['invites/' + state.userId + '/' + matchId]: null
+  });
+  enterMatch(matchId);
+  return true;
 }
 
 /* ================================================================
@@ -2215,24 +2371,33 @@ function finalizeAll(m) {
 async function openHistory() {
   showScreen('screen-history');
   const list = $('#history-list');
-  list.innerHTML = '';
+  list.innerHTML = '<div class="empty">Загружаем…</div>';
   const snap = await db.ref('history/' + state.userId).get();
-  renderHistory(snap.val());
+  // Ключ записи (_k) нужен кнопке «Удалить», чтобы снести именно её
+  historyCache = Object.entries(snap.val() || {}).map(([_k, h]) => ({ ...h, _k }))
+    .sort((a, b) => (b.time || 0) - (a.time || 0));
+  renderHistory();
 }
 
-function renderHistory(obj) {
+function renderHistory() {
   const list = $('#history-list');
   const empty = $('#history-empty');
   list.innerHTML = '';
-  // Сохраняем ключ записи (_k) — по нему кнопка «Удалить» точечно чистит именно эту запись
-  const entries = obj ? Object.entries(obj).map(([_k, h]) => ({ ...h, _k })) : [];
-  entries.sort((a, b) => (b.time || 0) - (a.time || 0));
+  const entries = historyCache.filter(h =>
+    historyFilter === 'all' ? true :
+    historyFilter === 'win' ? h.result === 'win' :
+    h.result !== 'win');          // «Поражения» включают и матчи, из которых вышли
   empty.style.display = entries.length ? 'none' : 'block';
+  if (!entries.length && historyCache.length) {
+    empty.querySelector('div:last-child').textContent = 'В этой подборке пусто';
+  }
 
   entries.forEach(h => {
-    const modeTxt = h.goalType === 'common'
-      ? `🎯 На цель · ${h.targetHits}`
-      : '🔥 Свободный';
+    let modeTxt;
+    if (h.goalType === 'common')     modeTxt = `🎯 На цель · ${h.targetHits}`;
+    else if (h.goalType === 'timed') modeTxt = `⏳ На время · ${h.durationMin} мин`;
+    else                             modeTxt = '🔥 Свободный';
+    if (h.shotMode === 'zones') modeTxt += ' · 🎖️ зоны';
 
     let resultTxt, resultCls;
     if (h.result === 'win')       { resultTxt = '🏆 Победа'; resultCls = 'win'; }
@@ -2265,7 +2430,7 @@ function renderHistory(obj) {
         <span class="hc-date">${formatDate(h.time)}</span>
       </div>
       ${h.name ? `<div class="hc-name">${escapeHtml(h.name)}</div>` : ''}
-      <div class="hc-mode">${modeTxt} · твой счёт: ${h.myHits} / ${h.myMisses}</div>
+      <div class="hc-mode">${modeTxt} · твой счёт: ${h.myPoints != null ? h.myPoints + ' очк (' + h.myHits + '/' + h.myMisses + ')' : h.myHits + ' / ' + h.myMisses}</div>
       <div class="hc-players">${players}</div>
       ${logBtn}${vidBtn}
       <button class="hc-del-btn" title="Удалить из истории">🗑 Удалить</button>`;
@@ -2413,6 +2578,7 @@ async function deleteHistory(h, card) {
   const label = h.name ? '«' + h.name + '»' : 'этот матч';
   if (!await showConfirm('Удалить ' + label + ' из истории? Только у тебя.', 'Удалить', '🗑️')) return;
   if (h._k) await db.ref('history/' + state.userId + '/' + h._k).remove();
+  historyCache = historyCache.filter(x => x._k !== h._k);
   card.remove();
   if (!$('#history-list').children.length) $('#history-empty').style.display = 'block';
 }
@@ -2456,6 +2622,72 @@ async function saveEditMatch() {
   $('#edit-backdrop').hidden = true;
   editingMatchId = null;
   openMyMatches();
+}
+
+/* ================================================================
+   ЭКРАН 10 — ЛИЧНЫЕ ВСТРЕЧИ
+   ================================================================ */
+/* Счёт против каждого соперника считаем из собственной истории: там лежит
+   состав каждого матча, а значит и результат очной встречи. */
+function openH2H() {
+  showScreen('screen-h2h');
+  const list = $('#h2h-list');
+  const empty = $('#h2h-empty');
+  list.innerHTML = '';
+
+  const foes = {};
+  historyCache.forEach(h => {
+    const roster = h.roster || [];
+    const me = roster.find(r => r.userId === state.userId)
+            || roster.find(r => r.nickname === state.nickname);
+    if (!me) return;
+
+    roster.forEach(r => {
+      // Старые записи в истории писались без userId — тогда опираемся на ник
+      const key = r.userId || ('nick:' + r.nickname);
+      if (r.userId === state.userId || (!r.userId && r.nickname === state.nickname)) return;
+
+      const f = foes[key] || (foes[key] = {
+        nickname: r.nickname, avatar: r.avatar, color: r.color, photo: r.photo,
+        games: 0, wins: 0, losses: 0, draws: 0, myPts: 0, hisPts: 0, lastTime: 0
+      });
+      f.nickname = r.nickname;                 // ник мог поменяться — держим свежий
+      f.games++;
+      f.myPts  += me.points != null ? me.points : (me.hits || 0);
+      f.hisPts += r.points != null ? r.points : (r.hits || 0);
+      f.lastTime = Math.max(f.lastTime, h.time || 0);
+
+      // Сравниваем по месту, если оно есть, иначе по счёту
+      const c = cmpFinal(me, r);
+      if (c < 0) f.wins++; else if (c > 0) f.losses++; else f.draws++;
+    });
+  });
+
+  const rows = Object.values(foes).sort((a, b) => b.games - a.games || b.lastTime - a.lastTime);
+  empty.style.display = rows.length ? 'none' : 'block';
+
+  rows.forEach(f => {
+    const verdict = f.wins > f.losses ? 'good' : f.wins < f.losses ? 'bad' : 'even';
+    const row = document.createElement('div');
+    row.className = 'rate-row h2h-row ' + verdict;
+    row.innerHTML = `
+      ${miniAvatar(f)}
+      <div class="rate-info">
+        <div class="rate-name">${escapeHtml(f.nickname)}</div>
+        <div class="rate-sub">${f.games} ${plural(f.games, 'встреча', 'встречи', 'встреч')} · очки ${f.myPts}:${f.hisPts}${f.draws ? ' · ничьих ' + f.draws : ''}</div>
+      </div>
+      <div class="h2h-score"><b>${f.wins}</b><i>:</i><b>${f.losses}</b></div>`;
+    list.appendChild(row);
+  });
+}
+
+// Русские окончания для счётных слов: 1 встреча, 2 встречи, 5 встреч
+function plural(n, one, few, many) {
+  const a = Math.abs(n) % 100, b = a % 10;
+  if (a > 10 && a < 20) return many;
+  if (b > 1 && b < 5) return few;
+  if (b === 1) return one;
+  return many;
 }
 
 /* ================================================================
