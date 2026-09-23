@@ -430,7 +430,13 @@ input[type="time"]::-webkit-calendar-picker-indicator { filter: invert(.7); curs
 @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 .modal { width: 100%; max-width: 340px; background: var(--glass-2); border: 1px solid var(--hairline-2);
   border-radius: 26px; padding: 28px 24px 22px; text-align: center; box-shadow: var(--shadow), var(--edge);
-  backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur); animation: modalIn .32s var(--ease); }
+  backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur); animation: modalIn .32s var(--ease);
+  /* Профиль вырос: статистика, достижения и настройки не влезают в экран,
+     поэтому модалка скроллится, а кнопки внизу всегда остаются досягаемыми. */
+  max-height: calc(100dvh - 48px); overflow-y: auto; overscroll-behavior: contain; }
+/* Кнопки «Отмена/Сохранить» липнут к низу, чтобы не терялись при прокрутке */
+.modal .modal-actions { position: sticky; bottom: -22px; margin-top: 6px; padding: 12px 0 0;
+  background: linear-gradient(180deg, transparent, var(--card2) 38%); }
 @keyframes modalIn { from { opacity: 0; transform: translateY(12px) scale(.95); } to { opacity: 1; transform: none; } }
 .modal-icon { font-size: 42px; }
 .modal-text { font-size: 16px; font-weight: 600; margin: 14px 0 20px; line-height: 1.45; letter-spacing: -0.01em; }
@@ -579,4 +585,129 @@ input[type="time"]::-webkit-calendar-picker-indicator { filter: invert(.7); curs
   object-fit: cover;
   border-radius: inherit;
   display: block; border: none;
+}
+
+/* ================================================================
+   ЧАСЫ МАТЧА «НА ВРЕМЯ»
+   ================================================================ */
+#screen-match .match-clock {
+  position: relative; z-index: 3; flex: none;
+  margin: 0 auto 8px; padding: 5px 16px;
+  border-radius: 20px; background: rgba(0,0,0,.3); border: 1px solid var(--hairline);
+  font-size: 13px; font-weight: 600; color: var(--muted); letter-spacing: .04em;
+}
+#screen-match .match-clock b { color: var(--text); font-variant-numeric: tabular-nums; font-size: 15px; }
+/* Последние 30 секунд — пульсируем красным */
+#screen-match .match-clock.low { border-color: rgba(251,113,133,.5); color: var(--red); animation: clockLow 1s ease-in-out infinite; }
+#screen-match .match-clock.low b { color: var(--red); }
+@keyframes clockLow { 0%,100% { opacity: 1; } 50% { opacity: .55; } }
+
+/* ================================================================
+   ЗОНЫ БРОСКА (продвинутый режим)
+   ================================================================ */
+#screen-match .zbar { position: relative; z-index: 9; display: flex; gap: 10px; padding: 8px 16px 0; flex: none; }
+#screen-match .shot.zone {
+  flex: 1; flex-direction: column; gap: 1px; padding: 11px 6px;
+  background: linear-gradient(180deg, rgba(255,255,255,.14), rgba(255,255,255,.04));
+  border: 1px solid var(--hairline-2);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.16), 0 6px 18px rgba(0,0,0,.3);
+}
+#screen-match .shot.zone span  { font-size: 19px; font-weight: 800; letter-spacing: -.01em; }
+#screen-match .shot.zone small { font-size: 9px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; opacity: .62; }
+#screen-match .shot.zone.z1 { color: var(--cyan-2); }
+#screen-match .shot.zone.z2 { color: var(--gold); }
+#screen-match .shot.zone.z3 { color: var(--accent-2); }
+#screen-match .ic.undo { color: var(--gold); }
+
+/* Табло: точность под ником и подпись попаданий под очками */
+#screen-match .sub-line { display: flex; align-items: center; gap: 7px; margin-top: 2px; }
+#screen-match .sub-line .acc { font-size: 10.5px; font-weight: 600; color: var(--faint); font-variant-numeric: tabular-nums; }
+
+
+/* ================================================================
+   БЫСТРЫЕ РЕАКЦИИ
+   ================================================================ */
+.reactions-row { position: relative; z-index: 9; display: flex; gap: 6px; padding: 6px 16px 0; flex: none; justify-content: center; }
+.rx-btn {
+  width: 40px; height: 34px; flex: none; cursor: pointer; font-size: 17px; line-height: 1;
+  border-radius: 11px; border: 1px solid var(--hairline); background: var(--glass);
+  transition: transform .12s var(--ease), background .2s;
+}
+.rx-btn:hover  { background: var(--glass-2); }
+.rx-btn:active { transform: scale(.88); }
+
+/* Слой, по которому реакции улетают вверх */
+.reaction-layer { position: absolute; inset: 0; pointer-events: none; z-index: 10; overflow: hidden; }
+.reaction-layer .rx {
+  position: absolute; bottom: 130px; display: flex; flex-direction: column; align-items: center; gap: 2px;
+  animation: rxUp 2.6s var(--ease) forwards;
+}
+.reaction-layer .rx-em  { font-size: 32px; filter: drop-shadow(0 4px 12px rgba(0,0,0,.55)); }
+.reaction-layer .rx-who { font-size: 10px; font-weight: 700; color: var(--muted); text-shadow: 0 1px 4px rgba(0,0,0,.7); }
+@keyframes rxUp {
+  0%   { opacity: 0; transform: translateY(20px) scale(.5); }
+  18%  { opacity: 1; transform: translateY(0) scale(1.1); }
+  30%  { transform: translateY(-14px) scale(1); }
+  100% { opacity: 0; transform: translate(var(--drift, 0), -220px) scale(.85); }
+}
+.event-item.undo { border-left-color: var(--gold); color: var(--gold); }
+
+/* ================================================================
+   ЭКРАН РЕЙТИНГА
+   ================================================================ */
+#screen-rating .segment.wide { margin: 0 18px; }
+.segment.wide .seg-btn { font-size: 12.5px; padding: 9px 4px; }
+.rating-list { display: flex; flex-direction: column; gap: 9px; }
+.rate-row {
+  display: flex; align-items: center; gap: 12px; padding: 12px 14px;
+  background: var(--glass); border: 1px solid var(--hairline); border-radius: var(--radius-sm);
+  box-shadow: var(--edge); animation: cardIn .3s var(--ease);
+}
+.rate-row.me     { border-color: rgba(255,122,69,.45); background: var(--accent-soft); }
+.rate-row.podium { background: var(--glass-2); }
+.rate-place { width: 30px; flex: none; text-align: center; font-size: 15px; font-weight: 800; color: var(--faint); font-variant-numeric: tabular-nums; }
+.rate-row.podium .rate-place { font-size: 19px; }
+.rate-info { flex: 1; min-width: 0; }
+.rate-name { font-size: 15px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rate-name .me-tag { color: var(--accent); font-size: 11px; margin-left: 5px; }
+.rate-sub  { font-size: 11.5px; color: var(--muted); margin-top: 3px; }
+.rate-val  { flex: none; text-align: right; font-size: 21px; font-weight: 800; color: var(--accent-2); font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
+.rate-val small { display: block; font-size: 9.5px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; color: var(--faint); }
+
+/* ================================================================
+   ПРОФИЛЬ: СТАТИСТИКА, ДОСТИЖЕНИЯ, НАСТРОЙКИ
+   ================================================================ */
+.prof-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 7px; margin-bottom: 6px; }
+.pstat {
+  background: rgba(0,0,0,.24); border: 1px solid var(--hairline); border-radius: 12px;
+  padding: 9px 4px; text-align: center;
+}
+.pstat b    { display: block; font-size: 17px; font-weight: 800; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+.pstat span { display: block; font-size: 9px; color: var(--faint); margin-top: 2px; letter-spacing: .05em; text-transform: uppercase; }
+
+.ach-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; margin-bottom: 6px; }
+.ach {
+  background: rgba(0,0,0,.24); border: 1px solid var(--hairline); border-radius: 12px;
+  padding: 10px 5px; text-align: center; opacity: .38; filter: grayscale(1);
+  transition: opacity .2s, filter .2s;
+}
+/* Полученное достижение «зажигается» */
+.ach.got { opacity: 1; filter: none; border-color: rgba(255,211,107,.36); background: rgba(255,211,107,.09); }
+.ach-ic { font-size: 22px; line-height: 1.1; }
+.ach-nm { font-size: 10.5px; font-weight: 700; margin-top: 4px; }
+.ach-ds { font-size: 8.5px; color: var(--faint); margin-top: 2px; line-height: 1.3; }
+
+.switch-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 11px 14px; margin-bottom: 7px; cursor: pointer;
+  background: rgba(0,0,0,.24); border: 1px solid var(--hairline); border-radius: 12px;
+  font-size: 13.5px; font-weight: 500;
+}
+.switch-row input { width: 20px; height: 20px; accent-color: var(--accent); cursor: pointer; }
+.switch-row input:disabled { opacity: .4; cursor: not-allowed; }
+
+/* На узких экранах четыре плитки статистики не помещаются */
+@media (max-width: 380px) {
+  .prof-stats { grid-template-columns: repeat(2, 1fr); }
+  .ach-grid   { grid-template-columns: repeat(2, 1fr); }
 }

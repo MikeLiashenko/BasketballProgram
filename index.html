@@ -8,7 +8,14 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet" />
   <!-- ?v — чтобы браузер не подсовывал старую версию после обновления файлов -->
-  <link rel="stylesheet" href="style.css?v=24" />
+  <link rel="stylesheet" href="style.css?v=25" />
+  <link rel="manifest" href="manifest.json" />
+  <meta name="theme-color" content="#0a0c11" />
+  <meta name="description" content="Баскетбольные матчи между игроками в реальном времени: броски по очереди, табло, история и видео матча." />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <link rel="apple-touch-icon" href="icon.svg" />
+  <link rel="icon" href="icon.svg" type="image/svg+xml" />
 </head>
 <body>
   <div class="app-shell">
@@ -60,10 +67,13 @@
             <div class="user-stats">
               <span class="stat-pill">🏀 <b id="menu-stat-matches">0</b></span>
               <span class="stat-pill">🎯 <b id="menu-stat-acc">0%</b></span>
+              <span class="stat-pill">🏆 <b id="menu-stat-wins">0</b></span>
             </div>
           </div>
         </div>
         <div class="topbar-actions">
+          <button id="install-btn" class="btn-icon ghost" title="Установить приложение" hidden>⬇️</button>
+          <button id="rating-btn" class="btn-icon ghost" title="Рейтинг игроков">🏆</button>
           <button id="mymatches-btn" class="btn-icon ghost" title="Мои матчи">🎮</button>
           <button id="history-btn" class="btn-icon ghost" title="История матчей">🕘</button>
           <button id="sound-btn" class="btn-icon ghost" title="Звук вкл/выкл">🔊</button>
@@ -110,11 +120,11 @@
               <div class="choice-desc">Броски по очереди. Попал — бросаешь ещё</div>
             </div>
           </button>
-          <button id="type-advanced" class="choice-card disabled" disabled>
-            <div class="choice-ic">🔒</div>
+          <button id="type-advanced" class="choice-card">
+            <div class="choice-ic">🎖️</div>
             <div>
               <div class="choice-title">Продвинутый</div>
-              <div class="choice-desc">Скоро</div>
+              <div class="choice-desc">Броски с зон: <b>+1</b> штрафной, <b>+2</b> средний, <b>+3</b> дальний. Побеждает тот, кто набрал больше очков</div>
             </div>
           </button>
           <div class="wizard-nav">
@@ -143,8 +153,25 @@
             </div>
           </button>
 
+          <button class="choice-card" data-goal="timed">
+            <div class="choice-ic">⏳</div>
+            <div>
+              <div class="choice-title">На время</div>
+              <div class="choice-desc">Играете <b>N минут</b>. Время вышло — матч закрывается сам, побеждает лучший счёт</div>
+            </div>
+          </button>
+
+          <div id="duration-wrap" class="target-wrap" hidden>
+            <label>Сколько минут играем?</label>
+            <div class="stepper">
+              <button class="btn-icon" data-duration="-1">−</button>
+              <input id="duration-input" type="number" min="1" max="120" value="10" />
+              <button class="btn-icon" data-duration="1">+</button>
+            </div>
+          </div>
+
           <div id="target-wrap" class="target-wrap" hidden>
-            <label>Сколько попаданий нужно каждому?</label>
+            <label id="target-label">Сколько попаданий нужно каждому?</label>
             <div class="stepper">
               <button class="btn-icon" data-target="-1">−</button>
               <input id="target-input" type="number" min="1" max="99" value="10" />
@@ -228,6 +255,8 @@
 
       <div class="turnline" id="match-turn">—</div>
 
+      <div class="match-clock" id="match-clock" hidden>⏳ <b id="match-clock-num">0:00</b></div>
+
       <div class="turn-timer" id="turn-timer" hidden>
         <div class="turn-timer-track"><div class="turn-timer-bar" id="turn-timer-bar"></div></div>
         <div class="turn-timer-num" id="turn-timer-num">0</div>
@@ -235,7 +264,7 @@
 
       <div class="board">
         <div class="board-title" id="match-target">ТАБЛО</div>
-        <div class="thead"><span class="r">TOP</span><span>ИГРОК</span><span class="r">ПОПАЛ</span><span class="r">СЕРИЯ</span></div>
+        <div class="thead"><span class="r">TOP</span><span>ИГРОК</span><span class="r" id="match-score-head">ПОПАЛ</span><span class="r">СЕРИЯ</span></div>
         <div class="tbody" id="match-players"></div>
       </div>
 
@@ -246,12 +275,26 @@
       </div>
       <!-- КОНЕЦ НОВОГО БЛОКА -->
 
+      <!-- Быстрые реакции: видны всем, кто в матче -->
+      <div class="reactions-row" id="reactions-row"></div>
+
+      <!-- Зоны броска — только в продвинутом режиме -->
+      <div class="zbar" id="zones-bar" hidden>
+        <button class="shot zone z1" data-pts="1" disabled><span>+1</span><small>штрафной</small></button>
+        <button class="shot zone z2" data-pts="2" disabled><span>+2</span><small>средний</small></button>
+        <button class="shot zone z3" data-pts="3" disabled><span>+3</span><small>дальний</small></button>
+      </div>
+
       <div class="bar">
         <button class="ic stop" id="finish-btn" title="Завершить матч" hidden><svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="3.2" fill="currentColor"/></svg></button>
         <button class="ic pause" id="leave-btn" title="Выйти из матча"><svg viewBox="0 0 24 24"><rect x="7" y="5" width="4" height="14" rx="1.6" fill="currentColor"/><rect x="13" y="5" width="4" height="14" rx="1.6" fill="currentColor"/></svg></button>
+        <button class="ic undo" id="undo-btn" title="Отменить последний бросок" hidden><svg viewBox="0 0 24 24"><path d="M9 7L4 12l5 5M4 12h9a6 6 0 1 1 0 12h-1" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
         <button class="shot make" id="btn-hit" disabled><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Попал</span></button>
         <button class="shot miss" id="btn-miss" disabled><svg viewBox="0 0 24 24"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round"/></svg><span>Промах</span></button>
       </div>
+
+      <!-- Прилетевшие реакции игроков -->
+      <div class="reaction-layer" id="reaction-layer"></div>
 
       <div class="pop" id="match-pop"></div>
       <svg class="ball" id="match-ball" viewBox="0 0 100 100" style="opacity:0">
@@ -276,7 +319,11 @@
         <div id="results-winner" class="winner-banner"></div>
         <div id="results-list" class="results-list"></div>
       </main>
-      <footer class="menu-footer">
+      <footer class="menu-footer stack">
+        <div class="match-actions">
+          <button id="results-rematch-btn" class="btn btn-ghost">🔁 Реванш</button>
+          <button id="results-share-btn" class="btn btn-ghost">📤 Поделиться</button>
+        </div>
         <button id="results-menu-btn" class="btn btn-accent btn-big">В меню</button>
       </footer>
     </section>
@@ -294,6 +341,24 @@
           <div class="empty-emoji">📜</div>
           <div>Ты ещё не сыграл ни одного матча</div>
         </div>
+      </main>
+    </section>
+
+    <!-- ============ ЭКРАН 9: РЕЙТИНГ ИГРОКОВ ============ -->
+    <section id="screen-rating" class="screen">
+      <header class="topbar">
+        <button class="btn-icon ghost" data-nav="menu">‹</button>
+        <div class="topbar-title">Рейтинг</div>
+        <div class="topbar-spacer"></div>
+      </header>
+      <div class="segment wide" id="seg-rating">
+        <button type="button" class="seg-btn active" data-sort="wins">Победы</button>
+        <button type="button" class="seg-btn" data-sort="acc">Точность</button>
+        <button type="button" class="seg-btn" data-sort="hits">Попадания</button>
+        <button type="button" class="seg-btn" data-sort="streak">Серия</button>
+      </div>
+      <main class="menu-body">
+        <div id="rating-list" class="rating-list"></div>
       </main>
     </section>
 
@@ -347,16 +412,28 @@
 <!-- ============ МОДАЛКА ПРОФИЛЯ (аватар/цвет) ============ -->
   <div id="profile-backdrop" class="modal-backdrop" hidden>
     <div class="modal">
-      <div class="avatar-preview" id="profile-preview">🏀</div>
+      <div class="reg-preview"><div class="avatar-preview" id="profile-preview">🏀</div></div>
       <!-- Кнопка и инпут для загрузки фото в профиле -->
       <button class="btn-icon ghost photo-btn" id="prof-photo-btn" title="Загрузить фото" type="button" style="margin: 10px auto;">📷</button>
       <input type="file" id="prof-photo-file" accept="image/jpeg, image/png, image/webp" hidden />
       
-      <div class="modal-text">Твой аватар</div>
+      <div class="modal-text" id="profile-nick">Профиль</div>
+
+      <div class="picker-label">Статистика</div>
+      <div class="prof-stats" id="profile-stats"></div>
+
+      <div class="picker-label">Достижения</div>
+      <div class="ach-grid" id="profile-ach"></div>
+
       <div class="picker-label">Эмодзи</div>
       <div class="emoji-grid" id="profile-emoji"></div>
       <div class="picker-label">Цвет</div>
       <div class="color-grid" id="profile-color"></div>
+
+      <div class="picker-label">Настройки</div>
+      <label class="switch-row"><span>📳 Вибрация</span><input type="checkbox" id="opt-haptics" /></label>
+      <label class="switch-row"><span>🔔 Уведомлять о моём ходе</span><input type="checkbox" id="opt-notify" /></label>
+
       <div class="modal-actions">
         <button id="profile-cancel" class="btn btn-ghost">Отмена</button>
         <button id="profile-save" class="btn btn-accent">Сохранить</button>
@@ -404,7 +481,6 @@
   <!-- Firebase (compat SDK) -->
   <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-database-compat.js"></script>
-  <script src="audio-clip.js?v=24"></script>
-  <script src="scripts.js?v=24"></script>
+  <script src="scripts.js?v=25"></script>
 </body>
 </html>

@@ -29,6 +29,7 @@ const state = {
   avatar: null,
   color: null,
   photo: null,
+  stats: null,
   currentMatchId: null,
   wizard: { goalType: null, targetHits: 10, selected: {} } // selected: { userId: {nickname, avatar, color} }
 };
@@ -49,6 +50,13 @@ let lobbyIntervalId = null; // тик обратного отсчёта в ло�
 let editingMatchId = null;  // id матча, открытого в модалке редактирования
 let lastRenderedMatch = null; // последнее состояние матча, показанное на экране (для проверки хода в момент клика)
 let logVideoSource = null;    // запись истории, открытая в модалке лога (для кнопки «Сгенерировать видео»)
+let clockIntervalId = null;   // тик обратного отсчёта в матче «на время»
+let lastReactionTime = null;  // чтобы не проигрывать реакции, прилетевшие до входа
+let prevTurnUid = null;       // чей был ход в прошлом рендере (для сигнала «твоя очередь»)
+let ratingSort = 'wins';      // текущая сортировка на экране рейтинга
+let ratingUsers = [];         // выгруженные для рейтинга игроки
+let lastFinishedMatch = null; // матч на экране результатов — для реванша и «поделиться»
+let deferredInstall = null;   // отложенное событие установки PWA
 
 /* ================================================================
    УТИЛИТЫ
@@ -200,6 +208,94 @@ function accuracy(hits, misses) {
   return total ? Math.round((hits / total) * 100) : 0;
 }
 
+/* ---------- Очки и ранжирование ---------- */
+/* В простом режиме одно попадание = одно очко, в продвинутом бросок стоит 1/2/3
+   в зависимости от зоны. У матчей, сыгранных до появления зон, поля points нет —
+   для них очками считаем попадания. */
+function ptsOf(p)  { return p && p.points != null ? p.points : ((p && p.hits) || 0); }
+function isZones(m) { return (m && m.shotMode) === 'zones'; }
+
+// Кто выше по ходу матча: очки ↓, попадания ↓, промахи ↑
+function cmpPlayers(a, b) {
+  return ptsOf(b) - ptsOf(a) || ((b.hits || 0) - (a.hits || 0)) || ((a.misses || 0) - (b.misses || 0));
+}
+// То же, но занятое место важнее счёта: кто добежал до цели раньше — тот выше
+function cmpFinal(a, b) {
+  if (a.place && b.place) return a.place - b.place;
+  if (a.place) return -1;
+  if (b.place) return 1;
+  return cmpPlayers(a, b);
+}
+
+/* ---------- Вибрация ---------- */
+/* Короткие отклики на бросок и на переход хода. На десктопе navigator.vibrate
+   отсутствует — тогда модуль просто молчит. */
+const Haptics = (() => {
+  let on = localStorage.getItem(LS.haptics) !== '0';   // по умолчанию включена
+  const buzz = pattern => {
+    if (!on || !navigator.vibrate) return;
+    try { navigator.vibrate(pattern); } catch (e) {}
+  };
+  return {
+    isOn()   { return on; },
+    set(v)   { on = !!v; localStorage.setItem(LS.haptics, on ? '1' : '0'); },
+    tap()    { buzz(10); },
+    hit()    { buzz([0, 24, 36, 18]); },
+    miss()   { buzz(80); },
+    turn()   { buzz([0, 36, 80, 36]); },
+    win()    { buzz([0, 60, 60, 60, 60, 160]); }
+  };
+})();
+
+/* ---------- Уведомления о своём ходе ---------- */
+/* Когда вкладка свёрнута, игрок не видит, что очередь дошла до него.
+   Мигаем заголовком вкладки, а если разрешено — шлём системное уведомление. */
+const Notify = (() => {
+  let on = localStorage.getItem(LS.notify) === '1';
+  const BASE_TITLE = document.title;
+  let titleTimer = null;
+  const supported = 'Notification' in window;
+
+  function flashTitle(text) {
+    stopTitle();
+    let alt = false;
+    document.title = text;
+    titleTimer = setInterval(() => { alt = !alt; document.title = alt ? BASE_TITLE : text; }, 1100);
+  }
+  function stopTitle() {
+    if (titleTimer) { clearInterval(titleTimer); titleTimer = null; }
+    document.title = BASE_TITLE;
+  }
+  return {
+    isOn()      { return on && supported && Notification.permission === 'granted'; },
+    supported() { return supported; },
+    stopTitle,
+    // Просим разрешение только по явному переключателю в профиле
+    async set(v) {
+      if (!v || !supported) { on = false; localStorage.setItem(LS.notify, '0'); return false; }
+      let perm = Notification.permission;
+      if (perm === 'default') { try { perm = await Notification.requestPermission(); } catch (e) { perm = 'denied'; } }
+      on = perm === 'granted';
+      localStorage.setItem(LS.notify, on ? '1' : '0');
+      return on;
+    },
+    // Вкладка активна — пользователь и так всё видит, не мешаем
+    turn(matchName) {
+      if (!document.hidden) return;
+      flashTitle('🏀 Твой бросок!');
+      if (!this.isOn()) return;
+      try {
+        const n = new Notification('🏀 Твой бросок', {
+          body: matchName ? 'Матч «' + matchName + '» ждёт тебя' : 'Очередь дошла до тебя',
+          tag: 'bb-turn', renotify: true, icon: 'icon.svg'
+        });
+        n.onclick = () => { window.focus(); n.close(); };
+      } catch (e) {}
+    }
+  };
+})();
+document.addEventListener('visibilitychange', () => { if (!document.hidden) Notify.stopTitle(); });
+
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -244,9 +340,10 @@ function ensureNet() {
 }
 
 function triggerShotFeedback(ev) {
-  if (ev.action === 'hit')       { Sound.hit();    animateShot(true, ev.userId); }
-  else if (ev.action === 'miss') { Sound.miss();   animateShot(false, ev.userId); }
+  if (ev.action === 'hit')         { Sound.hit();  Haptics.hit();  animateShot(true, ev.userId, ev.points); }
+  else if (ev.action === 'miss')   { Sound.miss(); Haptics.miss(); animateShot(false, ev.userId); }
   else if (ev.action === 'finish') { Sound.finish(); }
+  else if (ev.action === 'undo')   { popMatch('Отменено', 'warn'); }
 }
 
 function popMatch(text, cls) {
@@ -267,11 +364,12 @@ function bumpScore(uid) {
   if (el) { el.classList.remove('bump'); void el.offsetWidth; el.classList.add('bump'); }
 }
 
-function animateShot(make, scorerUid) {
+function animateShot(make, scorerUid, points) {
   const scr = $('#screen-match'), ball = $('#match-ball'), hoop = $('#hoop-svg');
   if (!scr || !ball || !hoop) return;
   const reduce = matchMedia('(prefers-reduced-motion:reduce)').matches;
-  if (reduce) { if (make) { netSwish(); bumpScore(scorerUid); } popMatch(make ? '+1' : 'МИМО', make ? 'make' : 'miss'); return; }
+  const label = make ? '+' + (points || 1) : 'МИМО';
+  if (reduce) { if (make) { netSwish(); bumpScore(scorerUid); } popMatch(label, make ? 'make' : 'miss'); return; }
   const pr = scr.getBoundingClientRect(), hs = hoop.getBoundingClientRect();
   const startX = pr.width / 2 - 22, startY = pr.height - 150;
   const endX = (hs.left - pr.left) + hs.width / 2 - 22, endY = (hs.top - pr.top) + hs.height * 0.5 - 22;
@@ -283,10 +381,10 @@ function animateShot(make, scorerUid) {
     const x = startX + (tx - startX) * p, y = startY + (ty - startY) * p - Math.sin(p * Math.PI) * arc;
     ball.style.transform = `translate(${x}px,${y}px) rotate(${p * (make ? 420 : 300)}deg)`;
     if (p < 1) requestAnimationFrame(fr);
-    else make ? ballDrop(x, y, scorerUid) : ballDeflect(x, y);
+    else make ? ballDrop(x, y, scorerUid, label) : ballDeflect(x, y);
   })(t0);
 }
-function ballDrop(x, y, scorerUid) {
+function ballDrop(x, y, scorerUid, label) {
   const ball = $('#match-ball'); netSwish();
   const t0 = performance.now();
   (function f(now) {
@@ -294,7 +392,7 @@ function ballDrop(x, y, scorerUid) {
     ball.style.transform = `translate(${x}px,${y + p * 70}px) scale(${1 - p * .55})`;
     ball.style.opacity = 1 - p;
     if (p < 1) requestAnimationFrame(f);
-    else { ball.style.opacity = 0; popMatch('+1', 'make'); bumpScore(scorerUid); }
+    else { ball.style.opacity = 0; popMatch(label || '+1', 'make'); bumpScore(scorerUid); }
   })(t0);
 }
 function ballDeflect(x, y) {
@@ -396,12 +494,52 @@ function fmtCountdown(sec) {
 }
 
 /* ================================================================
+   PWA — установка на телефон и офлайн-оболочка
+   ================================================================ */
+function setupPWA() {
+  // Service worker живёт только на http(s): при открытии файла с диска его нет
+  if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('sw.js').catch(() => {});
+    });
+  }
+
+  // Chrome даёт событие заранее — придерживаем его и показываем свою кнопку
+  window.addEventListener('beforeinstallprompt', e => {
+    e.preventDefault();
+    deferredInstall = e;
+    const btn = $('#install-btn');
+    if (btn) btn.hidden = false;
+  });
+
+  window.addEventListener('appinstalled', () => {
+    deferredInstall = null;
+    const btn = $('#install-btn');
+    if (btn) btn.hidden = true;
+  });
+}
+
+async function promptInstall() {
+  const btn = $('#install-btn');
+  if (!deferredInstall) {
+    // Safari на iOS не поддерживает beforeinstallprompt — объясняем руками
+    showAlert('Открой меню браузера и выбери «На экран „Домой“»', '📲');
+    return;
+  }
+  deferredInstall.prompt();
+  try { await deferredInstall.userChoice; } catch (e) {}
+  deferredInstall = null;
+  if (btn) btn.hidden = true;
+}
+
+/* ================================================================
    ИНИЦИАЛИЗАЦИЯ
    ================================================================ */
 document.addEventListener('DOMContentLoaded', init);
 
 function init() {
   bindEvents();
+  setupPWA();
   updateSoundIcon();
   setupRegPickers();
   const uid = localStorage.getItem(LS.userId);
@@ -476,7 +614,17 @@ function bindEvents() {
   $('#logout-btn').addEventListener('click', logout);
   $('#history-btn').addEventListener('click', openHistory);
   $('#mymatches-btn').addEventListener('click', openMyMatches);
+  $('#rating-btn').addEventListener('click', openRating);
   $('#sound-btn').addEventListener('click', toggleSound);
+  $('#install-btn').addEventListener('click', promptInstall);
+
+  // --- Рейтинг: переключение сортировки ---
+  $$('#seg-rating .seg-btn').forEach(b => b.addEventListener('click', () => {
+    $$('#seg-rating .seg-btn').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    ratingSort = b.dataset.sort;
+    renderRating();
+  }));
 
   // --- Звук клика на любых кнопках (везде) ---
   document.addEventListener('pointerdown', e => {
@@ -525,13 +673,43 @@ function bindEvents() {
     });
   }
 
+  // --- Шаг 1: простой режим или зоны ---
+  [['#type-normal', 'simple'], ['#type-advanced', 'zones']].forEach(([sel, mode]) => {
+    const card = $(sel);
+    if (!card) return;
+    card.addEventListener('click', () => {
+      $('#type-normal').classList.toggle('selected', mode === 'simple');
+      $('#type-advanced').classList.toggle('selected', mode === 'zones');
+      state.wizard.shotMode = mode;
+      syncTargetLabel();
+    });
+  });
+
   // --- Шаг 2: выбор цели ---
   $$('[data-goal]').forEach(card => card.addEventListener('click', () => {
     $$('[data-goal]').forEach(c => c.classList.remove('selected'));
     card.classList.add('selected');
-    state.wizard.goalType = card.dataset.goal;
-    $('#target-wrap').hidden = (card.dataset.goal !== 'common');
+    const goal = card.dataset.goal;
+    state.wizard.goalType = goal;
+    $('#target-wrap').hidden = (goal !== 'common');
+    $('#duration-wrap').hidden = (goal !== 'timed');
   }));
+
+  // --- Шаг 2: степпер длительности матча «на время» ---
+  $$('[data-duration]').forEach(b => b.addEventListener('click', () => {
+    const inp = $('#duration-input');
+    let v = (parseInt(inp.value, 10) || 1) + (+b.dataset.duration);
+    v = Math.max(1, Math.min(120, v));
+    inp.value = v; state.wizard.durationMin = v;
+  }));
+  const durInput = $('#duration-input');
+  if (durInput) {
+    durInput.addEventListener('input', e => {
+      const val = parseInt(e.target.value, 10);
+      if (!isNaN(val)) state.wizard.durationMin = Math.max(1, Math.min(120, val));
+    });
+    durInput.addEventListener('blur', e => { e.target.value = state.wizard.durationMin; });
+  }
 
   // --- Шаг 2: степпер цели ---
   $$('[data-target]').forEach(b => b.addEventListener('click', () => {
@@ -576,13 +754,34 @@ function bindEvents() {
   $('#lobby-leave-btn').addEventListener('click', leaveLobby);
 
   // --- Матч ---
-  $('#btn-hit').addEventListener('click', () => recordShot('hit'));
+  $('#btn-hit').addEventListener('click', () => recordShot('hit', 1));
   $('#btn-miss').addEventListener('click', () => recordShot('miss'));
   $('#finish-btn').addEventListener('click', finishMatch);
   $('#leave-btn').addEventListener('click', leaveMatch);
+  $('#undo-btn').addEventListener('click', undoShot);
+  $$('#zones-bar .zone').forEach(b => b.addEventListener('click', () => recordShot('hit', +b.dataset.pts)));
+
+  // --- Матч: горячие клавиши на десктопе ---
+  document.addEventListener('keydown', e => {
+    if (!$('#screen-match').classList.contains('active')) return;
+    if (e.target.matches('input, textarea')) return;
+    if (e.key === '1' || e.key === '2' || e.key === '3') {
+      const zone = $(`#zones-bar .zone[data-pts="${e.key}"]`);
+      if (!$('#zones-bar').hidden && zone && !zone.disabled) { zone.click(); return; }
+      if (e.key === '1' && !$('#btn-hit').disabled) $('#btn-hit').click();
+    } else if (e.key === ' ' || e.key.toLowerCase() === 'd') {
+      if (!$('#btn-hit').hidden && !$('#btn-hit').disabled) { e.preventDefault(); $('#btn-hit').click(); }
+    } else if (e.key.toLowerCase() === 'x' || e.key.toLowerCase() === 'ч') {
+      if (!$('#btn-miss').disabled) $('#btn-miss').click();
+    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+      if (!$('#undo-btn').hidden) { e.preventDefault(); $('#undo-btn').click(); }
+    }
+  });
 
   // --- Результаты ---
   $('#results-menu-btn').addEventListener('click', goMenu);
+  $('#results-rematch-btn').addEventListener('click', startRematch);
+  $('#results-share-btn').addEventListener('click', shareResults);
 
   // --- Модалка ---
   $('#modal-ok').addEventListener('click', () => closeModal(true));
@@ -592,6 +791,15 @@ function bindEvents() {
   // --- Профиль (аватар/цвет) ---
   $('#menu-avatar').addEventListener('click', openProfile);
   $('#profile-save').addEventListener('click', saveProfile);
+  $('#opt-haptics').addEventListener('change', e => { Haptics.set(e.target.checked); if (e.target.checked) Haptics.tap(); });
+  $('#opt-notify').addEventListener('change', async e => {
+    const ok = await Notify.set(e.target.checked);
+    e.target.checked = ok;
+    // Разрешение можно отозвать только в настройках браузера — честно скажем об этом
+    if (!ok && e.target.checked !== false && Notification.permission === 'denied') {
+      showAlert('Уведомления запрещены в настройках браузера', '🔕');
+    }
+  });
   $('#profile-cancel').addEventListener('click', () => { $('#profile-backdrop').hidden = true; });
   $('#profile-backdrop').addEventListener('click', e => { if (e.target.id === 'profile-backdrop') $('#profile-backdrop').hidden = true; });
 
@@ -687,6 +895,14 @@ function openProfile() {
   buildEmojiGrid($('#profile-emoji'), () => profAvatar, em => { profAvatar = em; profPhoto = null; upd(); });
   buildColorGrid($('#profile-color'), () => profColor,  col => { profColor = col; upd(); });
   upd();
+
+  $('#profile-nick').textContent = state.nickname || 'Профиль';
+  renderProfileStats(state.stats);
+  // Переключатели читаются из localStorage, а не из БД: это настройки устройства
+  $('#opt-haptics').checked = Haptics.isOn();
+  const notifyBox = $('#opt-notify');
+  notifyBox.checked = Notify.isOn();
+  notifyBox.disabled = !Notify.supported();
   $('#profile-backdrop').hidden = false;
 }
 
@@ -793,6 +1009,8 @@ function goMenu() {
   stopMatchWatch();
   stopTurnTimer();
   stopLobbyTimer();
+  stopMatchClock();
+  Notify.stopTitle();
   state.currentMatchId = null;
   localStorage.removeItem(LS.activeMatch);
   prevInviteCount = -1; // сброс базовой линии, чтобы не пикать на первом снимке
@@ -820,8 +1038,10 @@ function renderHeader(u) {
   av.innerHTML = faceOf(u);
   av.style.background = `linear-gradient(135deg, ${colorOf(u)}, ${shade(colorOf(u), -30)})`;
   const st = u.stats || {};
+  state.stats = st;   // профиль берёт её отсюда, без отдельного запроса
   $('#menu-stat-matches').textContent = st.matches || 0;
   $('#menu-stat-acc').textContent = accuracy(st.hits, st.misses) + '%';
+  $('#menu-stat-wins').textContent = st.wins || 0;
 }
 
 function renderInvites(obj) {
@@ -912,12 +1132,17 @@ async function declineInvite(matchId) {
    ЭКРАН 3 — МАСТЕР СОЗДАНИЯ
    ================================================================ */
 function openWizard() {
-  state.wizard = { goalType: null, targetHits: 10, scorer: 'shooter', turnSeconds: 0, name: '', selected: {} };
-  // Выбираем визуально "Обычный" тип по умолчанию
+  state.wizard = { goalType: null, shotMode: 'simple', targetHits: 10, durationMin: 10,
+                   scorer: 'shooter', turnSeconds: 0, name: '', selected: {} };
+  // Выбираем визуально «Обычный» тип по умолчанию
   $('#type-normal').classList.add('selected');
+  $('#type-advanced').classList.remove('selected');
   $$('[data-goal]').forEach(c => c.classList.remove('selected'));
   $('#target-wrap').hidden = true;
+  $('#duration-wrap').hidden = true;
   $('#target-input').value = 10;
+  $('#duration-input').value = 10;
+  syncTargetLabel();
   $('#match-name').value = '';
   $('#user-search').value = '';
   // Предзаполняем дату/время текущими — пустые нативные поля выглядят некрасиво.
@@ -932,6 +1157,14 @@ function openWizard() {
   goToStep(1);
   showScreen('screen-create');
   loadUsersForWizard();
+}
+
+// В продвинутом режиме цель считается в очках, а не в попаданиях
+function syncTargetLabel() {
+  const lbl = $('#target-label');
+  if (lbl) lbl.textContent = state.wizard.shotMode === 'zones'
+    ? 'Сколько очков нужно набрать каждому?'
+    : 'Сколько попаданий нужно каждому?';
 }
 
 function goToStep(n) {
@@ -994,13 +1227,13 @@ async function createMatch() {
   const players = {};
   players[state.userId] = {
     nickname: state.nickname, avatar: state.avatar || null, color: state.color || null, photo: state.photo || null,
-    status: 'joined', hits: 0, misses: 0, streak: 0, joinedAt: TS
+    status: 'joined', hits: 0, misses: 0, points: 0, streak: 0, best: 0, joinedAt: TS
   };
   selectedIds.forEach(uid => {
     const sel = state.wizard.selected[uid];
     players[uid] = {
       nickname: sel.nickname, avatar: sel.avatar || null, color: sel.color || null, photo: sel.photo || null,
-      status: 'waiting', hits: 0, misses: 0, streak: 0
+      status: 'waiting', hits: 0, misses: 0, points: 0, streak: 0, best: 0
     };
   });
 
@@ -1009,8 +1242,11 @@ async function createMatch() {
     name: matchName,
     startAt: startAt || null,
     type: 'normal',
-    goalType: state.wizard.goalType,                                    // 'common' | 'individual'
+    shotMode: state.wizard.shotMode || 'simple',                        // 'simple' | 'zones'
+    goalType: state.wizard.goalType,                                    // 'common' | 'individual' | 'timed'
     targetHits: state.wizard.goalType === 'common' ? state.wizard.targetHits : null,
+    durationMin: state.wizard.goalType === 'timed' ? state.wizard.durationMin : null,
+    endsAt: null,                                                       // проставим на старте матча
     scorer: state.wizard.scorer || 'shooter',                           // 'shooter' | 'creator'
     turnSeconds: state.wizard.turnSeconds || 0,                         // 0 = без таймера
     turnStartedAt: null,
@@ -1030,7 +1266,7 @@ async function createMatch() {
       startAt: startAt || null,
       creatorNickname: state.nickname, creatorAvatar: state.avatar || null, creatorColor: state.color || null,
       creatorPhoto: state.photo || null,
-      goalType: state.wizard.goalType, timestamp: TS
+      goalType: state.wizard.goalType, shotMode: state.wizard.shotMode || 'simple', timestamp: TS
     };
   });
   await db.ref().update(updates);
@@ -1045,7 +1281,9 @@ function enterMatch(matchId) {
   stopMenuWatch();
   stopMatchWatch();
   state.currentMatchId = matchId;
-  lastEventTime = null;   // не проигрывать анимации для уже существующих событий
+  lastEventTime = null;    // не проигрывать анимации для уже существующих событий
+  lastReactionTime = null; // и не показывать реакции, прилетевшие до входа
+  prevTurnUid = null;
   confettiFor = null;
   prevMatchStatus = null;
   localStorage.setItem(LS.activeMatch, matchId);
@@ -1055,6 +1293,7 @@ function enterMatch(matchId) {
 
 function stopMatchWatch() {
   if (matchWatchRef) { matchWatchRef.off(); matchWatchRef = null; }
+  stopMatchClock();
 }
 
 function onMatchValue(snap) {
@@ -1080,10 +1319,12 @@ function renderLobby(m) {
   const creatorNick = (m.players[m.creatorId] || {}).nickname || '—';
 
   $('#lobby-title').textContent = m.name || (isCreator ? 'Твоё лобби' : 'Лобби · ' + creatorNick);
-  let info = m.goalType === 'common'
-    ? `🎯 На цель — каждому нужно набрать ${m.targetHits} попаданий`
-    : '🔥 Свободный матч — заканчивает создатель, побеждает лучший счёт';
-  if (m.turnSeconds) info += ` · ⏱ ${m.turnSeconds}с на ход`;
+  let info;
+  if (m.goalType === 'common')     info = `🎯 На цель — каждому нужно набрать ${m.targetHits} ${isZones(m) ? 'очков' : 'попаданий'}`;
+  else if (m.goalType === 'timed') info = `⏳ На время — ${m.durationMin} мин, побеждает лучший счёт`;
+  else                             info = '🔥 Свободный матч — заканчивает создатель, побеждает лучший счёт';
+  if (isZones(m))     info += ' · 🎖️ броски с зон (+1/+2/+3)';
+  if (m.turnSeconds)  info += ` · ⏱ ${m.turnSeconds}с на ход`;
   if (m.scorer === 'creator') info += ' · броски отмечает создатель';
   if (m.startAt) info += ` · 🕐 старт в ${fmtClock(m.startAt)}`;
   $('#lobby-info').textContent = info;
@@ -1158,6 +1399,8 @@ async function startMatch() {
     m.currentTurnIndex = 0;
     m.status = 'active';
     m.turnStartedAt = serverNow();
+    // Часы матча «на время» тикают от реального старта, а не от создания
+    if (m.goalType === 'timed' && m.durationMin) m.endsAt = serverNow() + m.durationMin * 60000;
     // «Ожидающих» НЕ отклоняем и приглашения НЕ удаляем — они смогут
     // присоединиться к уже идущему матчу позже (поздний вход).
     started = true;
@@ -1193,12 +1436,14 @@ function renderMatch(m) {
   showScreen('screen-match');
   stopLobbyTimer();
   ensureNet();
+  buildReactionsRow();
   lastRenderedMatch = m;
   const order = m.turnOrder || [];
   const activeId = order[m.currentTurnIndex];
   const isMyTurn = activeId === state.userId;
   const isCreator = m.creatorId === state.userId;
   const isCommon = m.goalType === 'common';
+  const zones = isZones(m);
   const scorer = effectiveScorer(m);   // при выходе создателя откатывается на 'shooter'
   const iAmScorer = scorer === 'creator' ? isCreator : isMyTurn;
 
@@ -1213,15 +1458,25 @@ function renderMatch(m) {
     turnEl.innerHTML = `Бросает <b>${escapeHtml(activeNick)}</b>`; turnEl.classList.remove('my');
   }
 
+  // Очередь только что дошла до меня — подсказываем, даже если вкладка свёрнута
+  if (isMyTurn && prevTurnUid !== state.userId) { Haptics.turn(); Notify.turn(m.name); }
+  prevTurnUid = activeId;
+
   setupTurnTimer(m);
+  setupMatchClock(m);
 
   const boardName = m.name || 'ТАБЛО';
-  $('#match-target').textContent = isCommon ? `${boardName} · ДО ${m.targetHits}` : `${boardName} · СВОБОДНЫЙ`;
+  let goalTxt;
+  if (isCommon)                    goalTxt = `ДО ${m.targetHits}` + (zones ? ' ОЧКОВ' : '');
+  else if (m.goalType === 'timed') goalTxt = `${m.durationMin} МИН`;
+  else                             goalTxt = 'СВОБОДНЫЙ';
+  $('#match-target').textContent = `${boardName} · ${goalTxt}`;
+  $('#match-score-head').textContent = zones ? 'ОЧКИ' : 'ПОПАЛ';
 
-  // Рейтинг-таблица: сортировка по попаданиям
+  // Рейтинг-таблица: сортировка по очкам
   const rows = order.map(uid => ({ uid, p: m.players[uid] })).filter(x => x.p)
-    .sort((a, b) => (b.p.hits || 0) - (a.p.hits || 0) || (b.p.streak || 0) - (a.p.streak || 0));
-  const leadUid = rows.length && (rows[0].p.hits || 0) > 0 ? rows[0].uid : null;
+    .sort((a, b) => cmpPlayers(a.p, b.p));
+  const leadUid = rows.length && ptsOf(rows[0].p) > 0 ? rows[0].uid : null;
 
   const tb = $('#match-players');
   tb.innerHTML = '';
@@ -1236,15 +1491,21 @@ function renderMatch(m) {
     else if (uid === leadUid) badge = '<span class="mb lead">лидер</span>';
     const color = colorOf(p);
     const strk = (!done && p.streak > 1) ? `<b class="fire">${p.streak}</b>` : (p.streak || 0);
+    // Колонка очков залита градиентом с обрезкой по тексту, поэтому мелкие
+    // подписи туда не кладём — они бы перекрасились. Попадания идут под ником.
+    const hitsNote = zones ? `<span class="acc">${p.hits || 0} поп.</span>` : '';
     const row = document.createElement('div');
     row.className = 'trow' + (active ? ' active' : '') + (i === 0 ? ' top1' : '') + (done ? ' done' : '');
     row.innerHTML = `
       <div class="rank">#${i + 1}</div>
       <div class="who">
         <div class="ava" style="--ring:${color};--glow:${hexA(color, active ? .7 : .26)};background:${hexA(color, .16)}">${faceOf(p)}</div>
-        <div class="nm"><div class="name">${escapeHtml(p.nickname)}</div>${badge}</div>
+        <div class="nm">
+          <div class="name">${escapeHtml(p.nickname)}</div>
+          <div class="sub-line">${badge}<span class="acc">${accuracy(p.hits, p.misses)}%</span>${hitsNote}</div>
+        </div>
       </div>
-      <div class="hits" id="mh-${uid}">${p.hits || 0}</div>
+      <div class="hits" id="mh-${uid}">${ptsOf(p)}</div>
       <div class="strk">${strk}</div>`;
     tb.appendChild(row);
   });
@@ -1268,22 +1529,42 @@ function renderMatch(m) {
   // Фидбек (звук + анимация) на КАЖДОЕ новое событие с прошлого рендера.
   // Важно для победного броска: в одной транзакции пишутся hit + finish,
   // поэтому надо проиграть оба, а не только самое последнее событие.
-  if (lastEventTime !== null) {
-    events.filter(ev => (ev.time || 0) > lastEventTime).forEach(triggerShotFeedback);
-  }
   const newest = events[events.length - 1];
-  if (newest) lastEventTime = Math.max(lastEventTime || 0, newest.time || 0);
-  // Кнопки броска — только активному игроку
+  if (lastEventTime === null) {
+    // Первый рендер: запоминаем отметку, чтобы не переигрывать уже случившееся
+    lastEventTime = newest ? (newest.time || 0) : 0;
+  } else {
+    events.filter(ev => (ev.time || 0) > lastEventTime).forEach(triggerShotFeedback);
+    if (newest) lastEventTime = Math.max(lastEventTime, newest.time || 0);
+  }
+
+  // --- Реакции игроков: показываем только то, что прилетело после прошлого рендера ---
+  const rx = m.reactions ? Object.values(m.reactions).sort((a, b) => (a.time || 0) - (b.time || 0)) : [];
+  const newestRx = rx[rx.length - 1];
+  if (lastReactionTime === null) {
+    lastReactionTime = newestRx ? (newestRx.time || 0) : 0;
+  } else {
+    rx.filter(r => (r.time || 0) > lastReactionTime).forEach(flyReaction);
+    if (newestRx) lastReactionTime = Math.max(lastReactionTime, newestRx.time || 0);
+  }
+
+  // Кнопки броска — только тому, кто вправе отмечать
   const activePlayer = m.players[activeId];
   const canShoot = iAmScorer && activePlayer && !activePlayer.finished && !activePlayer.left;
+  $('#zones-bar').hidden = !zones;
+  $('#btn-hit').hidden = zones;                 // в зонах роль «Попал» играют кнопки +1/+2/+3
   $('#btn-hit').disabled = !canShoot;
   $('#btn-miss').disabled = !canShoot;
-  $('#finish-btn').hidden = !isCreator;   // ⏹ Завершить — только создателю; ⏸ Выйти — всем
+  $$('#zones-bar .zone').forEach(b => { b.disabled = !canShoot; });
+  $('#finish-btn').hidden = !isCreator;         // ⏹ Завершить — только создателю; ⏸ Выйти — всем
+  $('#undo-btn').hidden = !canUndo(m);
 }
 
-/* Записать бросок — в транзакции (защита от гонок) */
-function recordShot(result) {
+/* Записать бросок — в транзакции (защита от гонок).
+   points: сколько очков стоит попадание (1 в простом режиме, 1/2/3 — в зонах). */
+function recordShot(result, points) {
   const mid = state.currentMatchId;
+  if (!mid) return;
   const ref = db.ref('matches/' + mid);
   const now = serverNow();
 
@@ -1295,11 +1576,15 @@ function recordShot(result) {
   const expectedIdx = lastRenderedMatch ? lastRenderedMatch.currentTurnIndex : -1;
   const expectedUid = expectedOrder[expectedIdx];
 
-  let raced = false; // ход сменился под ногами — транзакция намеренно отменена
+  let raced = false;   // ход сменился под ногами — транзакция намеренно отменена
+  let expired = false; // в матче «на время» время вышло, пока клик летел
 
   const p1 = ref.transaction(m => {
-    raced = false;
+    raced = false; expired = false;
     if (!m || m.status !== 'active') return m;
+
+    // Матч «на время»: срок вышел — бросок не засчитываем, закрываем матч
+    if (m.endsAt && now >= m.endsAt) { expired = true; return closeMatch(m, now); }
 
     // Чей сейчас ход
     const order = m.turnOrder || [];
@@ -1320,21 +1605,37 @@ function recordShot(result) {
     if (!p || p.finished || p.left) return;
     if (!m.events) m.events = {};
 
+    // Снимок для отмены: по нему undoShot() возвращает всё как было
+    const snap = {
+      uid: activeUid, by: state.userId, action: result, time: now,
+      prevStreak: p.streak || 0, prevTurnIndex: m.currentTurnIndex,
+      prevTurnStartedAt: m.turnStartedAt || null, keys: []
+    };
+
     let advance = false;
     const k1 = db.ref().push().key;
+    snap.keys.push(k1);
 
     if (result === 'hit') {
-      p.hits = (p.hits || 0) + 1;
+      const gain = isZones(m) ? Math.max(1, Math.min(3, points || 1)) : 1;
+      p.hits   = (p.hits || 0) + 1;
+      p.points = (p.points != null ? p.points : (p.hits - 1)) + gain;
       p.streak = (p.streak || 0) + 1;
-      m.events[k1] = { time: now, userId: activeUid, action: 'hit',
-        text: `${p.nickname} попал${p.streak > 1 ? ' — ' + p.streak + ' подряд' : ''}` };
-      
-      if (m.goalType === 'common' && m.targetHits && p.hits >= m.targetHits) {
+      p.best   = Math.max(p.best || 0, p.streak);
+      snap.points = gain;
+
+      const zoneTag = isZones(m) ? ` (+${gain})` : '';
+      m.events[k1] = { time: now, userId: activeUid, action: 'hit', points: gain,
+        text: `${p.nickname} попал${zoneTag}${p.streak > 1 ? ' — ' + p.streak + ' подряд' : ''}` };
+
+      if (m.goalType === 'common' && m.targetHits && ptsOf(p) >= m.targetHits) {
         p.finished = true;
         const finishedCount = Object.values(m.players).filter(x => x.finished).length;
         p.place = finishedCount;
-        
-        const k2 = db.ref().push().key; 
+        snap.finished = true;
+
+        const k2 = db.ref().push().key;
+        snap.keys.push(k2);
         m.events[k2] = { time: now + 1, userId: activeUid, action: 'finish',
           text: `🏁 ${p.nickname} достиг цели — место #${finishedCount}` };
         advance = true;
@@ -1342,14 +1643,17 @@ function recordShot(result) {
     } else {
       p.misses = (p.misses || 0) + 1;
       p.streak = 0;
+      snap.points = 0;
       m.events[k1] = { time: now, userId: activeUid, action: 'miss', text: `${p.nickname} промахнулся` };
       advance = true;
     }
 
+    m.lastShot = snap;
+
     if (advance) {
       const next = findNextTurn(m, m.currentTurnIndex);
-      if (next === -1) { m.status = 'finished'; m.winnerId = computeWinner(m); m.finishedAt = now; }
-      else m.currentTurnIndex = next;
+      if (next === -1) return closeMatch(m, now);
+      m.currentTurnIndex = next;
     }
     // Сброс отсчёта хода на каждый бросок (и когда попал и продолжает, и при передаче хода)
     if (m.status === 'active') m.turnStartedAt = serverNow();
@@ -1357,8 +1661,162 @@ function recordShot(result) {
   });
 
   p1.then(res => {
+    if (expired) { popMatch('Время вышло', 'warn'); return; }
     if (raced || !res.committed) popMatch('Ход сменился', 'warn');
   }).catch(() => { popMatch('Не отправилось', 'warn'); });
+}
+
+/* Общее закрытие матча: и по достижению цели, и по таймеру, и вручную */
+function closeMatch(m, now) {
+  m.status = 'finished';
+  m.winnerId = computeWinner(m);
+  m.finishedAt = now || serverNow();
+  m.lastShot = null;
+  return m;
+}
+
+/* ---------- Отмена последнего броска ---------- */
+/* Промахнулся мимо кнопки — обычное дело, когда телефон лежит на скамейке.
+   Отменить можно только свою последнюю отметку и только пока матч идёт. */
+const UNDO_WINDOW_MS = 25000;
+
+// Можно ли прямо сейчас показать кнопку «Отменить»
+function canUndo(m) {
+  const ls = m && m.lastShot;
+  if (!ls || m.status !== 'active') return false;
+  if (ls.by !== state.userId) return false;
+  return serverNow() - (ls.time || 0) < UNDO_WINDOW_MS;
+}
+
+async function undoShot() {
+  const mid = state.currentMatchId;
+  if (!mid) return;
+  let reason = '';
+
+  const res = await db.ref('matches/' + mid).transaction(m => {
+    reason = '';
+    if (!m || m.status !== 'active') { reason = 'Матч уже завершён'; return m; }
+    const ls = m.lastShot;
+    if (!ls)                         { reason = 'Нечего отменять';   return m; }
+    if (ls.by !== state.userId)      { reason = 'Отметил не ты';     return m; }
+    if (serverNow() - (ls.time || 0) >= UNDO_WINDOW_MS) { reason = 'Уже поздно отменять'; return m; }
+
+    const p = m.players[ls.uid];
+    if (!p) { reason = 'Игрока больше нет'; return m; }
+
+    // Возвращаем счёт игрока
+    if (ls.action === 'hit') {
+      p.hits   = Math.max(0, (p.hits || 0) - 1);
+      p.points = Math.max(0, ptsOf(p) - (ls.points || 1));
+    } else {
+      p.misses = Math.max(0, (p.misses || 0) - 1);
+    }
+    p.streak = ls.prevStreak || 0;
+    // Если этим броском игрок закрыл цель — снимаем финиш и освобождаем место
+    if (ls.finished) { p.finished = false; p.place = null; }
+
+    // Убираем записи брошенных событий из ленты
+    if (m.events) (ls.keys || []).forEach(k => { delete m.events[k]; });
+
+    // Возвращаем очередь тому, кто бросал
+    m.currentTurnIndex = ls.prevTurnIndex != null ? ls.prevTurnIndex : m.currentTurnIndex;
+    m.turnStartedAt = serverNow();
+
+    if (!m.events) m.events = {};
+    const k = db.ref().push().key;
+    m.events[k] = { time: serverNow(), userId: ls.uid, action: 'undo',
+      text: `↶ Бросок отменён — снова бросает ${p.nickname}` };
+
+    m.lastShot = null;
+    return m;
+  });
+
+  if (reason) popMatch(reason, 'warn');
+  else if (res.committed) { Sound.click(); Haptics.tap(); }
+}
+
+/* ---------- Матч «на время» ---------- */
+/* Время может выйти, когда никто не бросает, поэтому каждый клиент тикает сам
+   и первый заметивший закрывает матч транзакцией. Остальные её не продублируют:
+   статус уже будет finished. */
+function stopMatchClock() {
+  if (clockIntervalId) { clearInterval(clockIntervalId); clockIntervalId = null; }
+}
+
+function setupMatchClock(m) {
+  const wrap = $('#match-clock');
+  if (!wrap) return;
+  if (m.status !== 'active' || !m.endsAt) { stopMatchClock(); wrap.hidden = true; return; }
+  wrap.hidden = false;
+
+  const mid = state.currentMatchId, endsAt = m.endsAt;
+  const num = $('#match-clock-num');
+  const tick = () => {
+    const rem = Math.max(0, Math.ceil((endsAt - serverNow()) / 1000));
+    if (num) num.textContent = Math.floor(rem / 60) + ':' + String(rem % 60).padStart(2, '0');
+    wrap.classList.toggle('low', rem <= 30);
+    if (rem <= 0) { stopMatchClock(); expireMatch(mid, endsAt); }
+  };
+  stopMatchClock();
+  tick();
+  clockIntervalId = setInterval(tick, 500);
+}
+
+function expireMatch(mid, expectedEndsAt) {
+  db.ref('matches/' + mid).transaction(m => {
+    if (!m || m.status !== 'active') return m;
+    if (m.endsAt !== expectedEndsAt) return m;       // матч успели изменить
+    if (serverNow() < m.endsAt) return m;            // страховка от рассинхрона часов
+    if (!m.events) m.events = {};
+    const k = db.ref().push().key;
+    m.events[k] = { time: serverNow(), userId: '', action: 'finish', text: '⏳ Время вышло — матч окончен' };
+    return closeMatch(m, serverNow());
+  });
+}
+
+/* ---------- Быстрые реакции ---------- */
+const REACTIONS = ['🔥', '👏', '😂', '😱', '💪', '🧊'];
+const REACTIONS_KEEP = 24;   // сколько последних держим в матче, чтобы узел не разрастался
+
+function sendReaction(emoji) {
+  const mid = state.currentMatchId;
+  if (!mid || REACTIONS.indexOf(emoji) === -1) return;
+  Haptics.tap();
+  db.ref('matches/' + mid + '/reactions').transaction(r => {
+    r = r || {};
+    const k = db.ref().push().key;
+    r[k] = { emoji, userId: state.userId, nickname: state.nickname, time: serverNow() };
+    // Оставляем только последние — иначе за длинный матч накопятся сотни записей
+    const keys = Object.keys(r).sort((a, b) => (r[a].time || 0) - (r[b].time || 0));
+    while (keys.length > REACTIONS_KEEP) delete r[keys.shift()];
+    return r;
+  });
+}
+
+// Пролетающая эмодзи-реакция
+function flyReaction(rx) {
+  const layer = $('#reaction-layer');
+  if (!layer) return;
+  const el = document.createElement('div');
+  el.className = 'rx';
+  el.style.left = (12 + Math.random() * 64) + '%';
+  el.style.setProperty('--drift', (Math.random() * 60 - 30).toFixed(0) + 'px');
+  el.innerHTML = `<span class="rx-em">${escapeHtml(rx.emoji)}</span><span class="rx-who">${escapeHtml(rx.nickname || '')}</span>`;
+  layer.appendChild(el);
+  setTimeout(() => el.remove(), 2600);
+}
+
+function buildReactionsRow() {
+  const row = $('#reactions-row');
+  if (!row || row.childElementCount) return;
+  REACTIONS.forEach(em => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'rx-btn';
+    b.textContent = em;
+    b.addEventListener('click', () => sendReaction(em));
+    row.appendChild(b);
+  });
 }
 
 // Фактический режим отметки: если выбран 'creator', но создатель вышел из матча —
@@ -1438,9 +1896,10 @@ function expireTurn(mid, expectedStartedAt, seconds) {
     const k = db.ref().push().key;
     m.events[k] = { time: serverNow(), userId: activeUid, action: 'miss', text: `${p.nickname} не успел — промах` };
 
+    m.lastShot = null;   // авто-промах отменять нельзя — отменять нечего было
     const next = findNextTurn(m, m.currentTurnIndex);
-    if (next === -1) { m.status = 'finished'; m.winnerId = computeWinner(m); m.finishedAt = serverNow(); }
-    else { m.currentTurnIndex = next; m.turnStartedAt = serverNow(); }
+    if (next === -1) return closeMatch(m, serverNow());
+    m.currentTurnIndex = next; m.turnStartedAt = serverNow();
     return m;
   });
 }
@@ -1454,51 +1913,26 @@ function winnerByPlace(m) {
 function computeWinner(m) {
   const byPlace = winnerByPlace(m);
   if (byPlace) return byPlace;
-  
+
   const order = m.turnOrder || Object.keys(m.players);
-  let best = null;
-  let isTie = false; // Флаг для отслеживания ничьей
+  // Вышедшие из матча в борьбе за победу не участвуют
+  const live = order.map(uid => ({ uid, p: m.players[uid] })).filter(x => x.p && !x.p.left);
+  if (!live.length) return null;
 
-  order.forEach(uid => {
-    const p = m.players[uid];
-    // Пропускаем несуществующих игроков и тех, кто вышел (p.left)
-    if (!p || p.left) return;
-
-    if (!best) { 
-      best = uid; 
-      isTie = false;
-      return; 
-    }
-    
-    const bp = m.players[best];
-    const pHits = p.hits || 0;
-    const pMiss = p.misses || 0;
-    const bpHits = bp.hits || 0;
-    const bpMiss = bp.misses || 0;
-
-    if (pHits > bpHits || (pHits === bpHits && pMiss < bpMiss)) {
-      // Найден новый лидер
-      best = uid;
-      isTie = false;
-    } else if (pHits === bpHits && pMiss === bpMiss) {
-      // Показатели абсолютно равны — фиксируем ничью
-      isTie = true;
-    }
-  });
-
-  // Если ничья, возвращаем null (это включит баннер "Ничья" на экране результатов)
-  return isTie ? null : best;
+  live.sort((a, b) => cmpPlayers(a.p, b.p));
+  // Если лучших двое с абсолютно одинаковым счётом — это ничья (баннер «Ничья»)
+  if (live.length > 1 && cmpPlayers(live[0].p, live[1].p) === 0) return null;
+  return live[0].uid;
 }
 
 /* Завершить матч вручную (создатель) */
 async function finishMatch() {
+  const mid = state.currentMatchId;
+  if (!mid) return;
   if (!await showConfirm('Завершить матч для всех? Счёт зафиксируется как есть.', 'Завершить', '🏁')) return;
-  await db.ref('matches/' + state.currentMatchId).transaction(m => {
+  await db.ref('matches/' + mid).transaction(m => {
     if (!m || m.status === 'finished') return m;
-    m.status = 'finished';
-    m.winnerId = computeWinner(m);
-    m.finishedAt = serverNow();
-    return m;
+    return closeMatch(m, serverNow());
   });
 }
 
@@ -1522,8 +1956,8 @@ async function leaveMatch() {
         const pl = m.players[uid];
         return pl && !pl.finished && !pl.left;
       }).length;
-      if (playing <= 1) { m.status = 'finished'; m.winnerId = computeWinner(m); m.finishedAt = serverNow(); }
-      else if (wasActive) {
+      if (playing <= 1) return closeMatch(m, serverNow());
+      if (wasActive) {
         const next = findNextTurn(m, m.currentTurnIndex);
         if (next !== -1) { m.currentTurnIndex = next; m.turnStartedAt = serverNow(); }
       }
@@ -1554,46 +1988,143 @@ function renderResults(m) {
   showScreen('screen-results');
   stopTurnTimer();
   stopLobbyTimer();
+  stopMatchClock();
+  Notify.stopTitle();
+  lastFinishedMatch = m;
   $('#results-title').textContent = m.name ? 'Итоги · ' + m.name : 'Итоги матча';
+  const zones = isZones(m);
   const order = m.turnOrder || Object.keys(m.players).filter(uid => m.players[uid].status === 'joined');
 
   const ranked = order.map(uid => ({ uid, p: m.players[uid] })).filter(x => x.p);
-  ranked.sort((a, b) => {
-    if (a.p.place && b.p.place) return a.p.place - b.p.place;
-    if (a.p.place) return -1;
-    if (b.p.place) return 1;
-    if ((b.p.hits || 0) !== (a.p.hits || 0)) return (b.p.hits || 0) - (a.p.hits || 0);
-    return (a.p.misses || 0) - (b.p.misses || 0);
-  });
+  ranked.sort((a, b) => cmpFinal(a.p, b.p));
 
   const winner = m.players[m.winnerId];
+  const unit = zones ? 'очков' : 'попаданий';
   $('#results-winner').innerHTML = winner ? `
     <div class="cup">🏆</div>
     <div class="mini-av w-avatar" style="${avatarBg(colorOf(winner))}">${faceOf(winner)}</div>
     <div class="w-name">${escapeHtml(winner.nickname)}</div>
-    <div class="w-sub">${winner.hits || 0} попаданий · точность ${accuracy(winner.hits, winner.misses)}%</div>
+    <div class="w-sub">${ptsOf(winner)} ${unit} · точность ${accuracy(winner.hits, winner.misses)}%</div>
   ` : '<div class="cup">🏀</div><div class="w-name">Ничья</div>';
 
   const list = $('#results-list');
   list.innerHTML = '';
   ranked.forEach((x, i) => {
     const leftTag = x.p.left ? ' <span class="tag-left">(вышел)</span>' : '';
+    // В зонах очки и попадания — разные числа, показываем оба
+    const score = zones
+      ? `<b>${ptsOf(x.p)}</b> очк · ${x.p.hits || 0}/${x.p.misses || 0}`
+      : `<b>${x.p.hits || 0}</b> / ${x.p.misses || 0}`;
     const row = document.createElement('div');
     row.className = 'result-row' + (i === 0 && !x.p.left ? ' first' : '');
     row.innerHTML = `
       <div class="rank">${i + 1}</div>
       ${miniAvatar(x.p, true)}
       <div class="r-name">${escapeHtml(x.p.nickname)}${leftTag}</div>
-      <div class="r-score"><b>${x.p.hits || 0}</b> / ${x.p.misses || 0} · ${accuracy(x.p.hits, x.p.misses)}%</div>`;
+      <div class="r-score">${score} · ${accuracy(x.p.hits, x.p.misses)}%</div>`;
     list.appendChild(row);
   });
+
+  // Реванш зовём только тех, кто реально играл (не отклонивших приглашение)
+  const playedOthers = order.filter(uid => uid !== state.userId && m.players[uid]).length;
+  $('#results-rematch-btn').hidden = playedOthers < 1;
 
   // Конфетти + звук — один раз на матч
   if (confettiFor !== state.currentMatchId) {
     confettiFor = state.currentMatchId;
     if (winner) launchConfetti();
-    if (m.winnerId === state.userId) Sound.win();
+    if (m.winnerId === state.userId) { Sound.win(); Haptics.win(); }
     else Sound.lose();
+  }
+}
+
+/* ---------- Реванш: новый матч тем же составом и с теми же настройками ---------- */
+async function startRematch() {
+  const m = lastFinishedMatch;
+  if (!m) return;
+  const others = (m.turnOrder || Object.keys(m.players)).filter(uid => uid !== state.userId && m.players[uid]);
+  if (!others.length) { showAlert('Некого звать на реванш', '👥'); return; }
+  if (!await showConfirm(`Позвать всех на реванш? Настройки матча сохранятся.`, 'Зовём', '🔁')) return;
+
+  const matchId = db.ref('matches').push().key;
+  const baseName = (m.name || 'Матч').replace(/\s*·\s*реванш\s*\d*$/i, '');
+  const matchName = baseName + ' · реванш';
+
+  const blank = uid => {
+    const src = m.players[uid] || {};
+    return {
+      nickname: src.nickname, avatar: src.avatar || null, color: src.color || null, photo: src.photo || null,
+      status: uid === state.userId ? 'joined' : 'waiting',
+      hits: 0, misses: 0, points: 0, streak: 0, best: 0,
+      joinedAt: uid === state.userId ? TS : null
+    };
+  };
+  const players = {};
+  players[state.userId] = blank(state.userId);
+  // Свои аватар и ник могли поменяться с прошлого матча — берём актуальные
+  players[state.userId].nickname = state.nickname;
+  players[state.userId].avatar = state.avatar || null;
+  players[state.userId].color = state.color || null;
+  players[state.userId].photo = state.photo || null;
+  others.forEach(uid => { players[uid] = blank(uid); });
+
+  await db.ref('matches/' + matchId).set({
+    creatorId: state.userId,
+    name: matchName,
+    startAt: null,
+    type: 'normal',
+    shotMode: m.shotMode || 'simple',
+    goalType: m.goalType,
+    targetHits: m.targetHits || null,
+    durationMin: m.durationMin || null,
+    endsAt: null,
+    scorer: m.scorer || 'shooter',
+    turnSeconds: m.turnSeconds || 0,
+    turnStartedAt: null,
+    status: 'lobby',
+    players,
+    currentTurnIndex: 0,
+    rematchOf: state.currentMatchId || null,
+    createdAt: TS
+  });
+
+  const updates = {};
+  Object.keys(players).forEach(uid => { updates['userMatches/' + uid + '/' + matchId] = true; });
+  others.forEach(uid => {
+    updates['invites/' + uid + '/' + matchId] = {
+      name: matchName, startAt: null,
+      creatorNickname: state.nickname, creatorAvatar: state.avatar || null,
+      creatorColor: state.color || null, creatorPhoto: state.photo || null,
+      goalType: m.goalType, shotMode: m.shotMode || 'simple', timestamp: TS
+    };
+  });
+  await db.ref().update(updates);
+
+  enterMatch(matchId);
+}
+
+/* ---------- Поделиться итогом матча ---------- */
+async function shareResults() {
+  const m = lastFinishedMatch;
+  if (!m) return;
+  const zones = isZones(m);
+  const order = m.turnOrder || Object.keys(m.players);
+  const ranked = order.map(uid => m.players[uid]).filter(Boolean).sort(cmpFinal);
+
+  const lines = ranked.map((p, i) => {
+    const place = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : (i + 1) + '.';
+    return `${place} ${p.nickname} — ${ptsOf(p)}${zones ? ' очк' : ''} (${accuracy(p.hits, p.misses)}%)`;
+  });
+  const text = `🏀 ${m.name || 'Матч'}\n` + lines.join('\n');
+
+  try {
+    if (navigator.share) { await navigator.share({ title: 'Итоги матча', text }); return; }
+    await navigator.clipboard.writeText(text);
+    showAlert('Итоги скопированы — вставляй куда нужно', '📋');
+  } catch (e) {
+    // Отмена в системном окне «Поделиться» — это не ошибка, молчим
+    if (e && e.name === 'AbortError') return;
+    showAlert('Не получилось поделиться', '⚠️');
   }
 }
 
@@ -1608,11 +2139,17 @@ async function finalizePlayer(mid, uid, m) {
   if (!p) return;
 
   // 1. Общая статистика игрока
+  const won = m.winnerId === uid && !p.left;
   db.ref('users/' + uid + '/stats').transaction(s => {
-    s = s || { matches: 0, hits: 0, misses: 0 };
+    s = s || {};
     s.matches = (s.matches || 0) + 1;
     s.hits    = (s.hits || 0) + (p.hits || 0);
     s.misses  = (s.misses || 0) + (p.misses || 0);
+    s.points  = (s.points || 0) + ptsOf(p);
+    s.wins    = (s.wins || 0) + (won ? 1 : 0);
+    // Поражением считаем только доигранный матч: ушёл сам — это не поражение
+    s.losses  = (s.losses || 0) + (!won && !p.left ? 1 : 0);
+    s.best    = Math.max(s.best || 0, p.best || 0);
     return s;
   });
 
@@ -1626,16 +2163,12 @@ async function finalizePlayer(mid, uid, m) {
 function writeHistory(mid, uid, m) {
   const p = m.players[uid];
   const order = m.turnOrder || Object.keys(m.players);
-  const roster = order.map(id => m.players[id]).filter(Boolean).map(x => ({
+  const roster = order.map(id => ({ id, p: m.players[id] })).filter(x => x.p).map(({ id, p: x }) => ({
+    userId: id,                                   // нужен для статистики личных встреч
     nickname: x.nickname, avatar: x.avatar || null, color: x.color || null, photo: x.photo || null,
-    hits: x.hits || 0, misses: x.misses || 0,
+    hits: x.hits || 0, misses: x.misses || 0, points: ptsOf(x), best: x.best || 0,
     place: x.place || null, left: !!x.left
-  })).sort((a, b) => {
-    if (a.place && b.place) return a.place - b.place;
-    if (a.place) return -1;
-    if (b.place) return 1;
-    return (b.hits) - (a.hits);
-  });
+  })).sort(cmpFinal);
 
   let result;
   if (p.left)                  result = 'left';
@@ -1649,14 +2182,19 @@ function writeHistory(mid, uid, m) {
 
   const winner = m.players[m.winnerId];
   db.ref('history/' + uid + '/' + mid).set({
-    time: m.finishedAt || Date.now(),
+    time: m.finishedAt || serverNow(),
     name: m.name || null,
     goalType: m.goalType,
+    shotMode: m.shotMode || 'simple',
     targetHits: m.targetHits || null,
+    durationMin: m.durationMin || null,
     result,
     place: p.place || null,
     myHits: p.hits || 0,
     myMisses: p.misses || 0,
+    myPoints: ptsOf(p),
+    myBest: p.best || 0,
+    winnerId: m.winnerId || null,
     winnerNickname: winner ? winner.nickname : null,
     roster,
     events
@@ -1918,6 +2456,116 @@ async function saveEditMatch() {
   $('#edit-backdrop').hidden = true;
   editingMatchId = null;
   openMyMatches();
+}
+
+/* ================================================================
+   ЭКРАН 9 — РЕЙТИНГ ИГРОКОВ
+   ================================================================ */
+// Сколько бросков нужно, чтобы попасть в рейтинг по точности —
+// иначе первое место занимает тот, кто бросил один раз и попал.
+const RATING_MIN_SHOTS = 20;
+
+const RATING_SORTS = {
+  wins:   { label: 'побед',    value: st => st.wins || 0 },
+  hits:   { label: 'попаданий', value: st => st.hits || 0 },
+  streak: { label: 'серия',    value: st => st.best || 0 },
+  acc:    { label: 'точность', value: st => accuracy(st.hits, st.misses),
+            eligible: st => (st.hits || 0) + (st.misses || 0) >= RATING_MIN_SHOTS }
+};
+
+async function openRating() {
+  showScreen('screen-rating');
+  const list = $('#rating-list');
+  list.innerHTML = '<div class="empty">Считаем…</div>';
+  try {
+    const snap = await db.ref('users').get();
+    ratingUsers = Object.entries(snap.val() || {}).map(([uid, u]) => ({
+      uid, nickname: u.nickname || '—', avatar: u.avatar, color: u.color, photo: u.photo,
+      st: u.stats || {}
+    }));
+    renderRating();
+  } catch (e) {
+    list.innerHTML = '<div class="empty">Не удалось загрузить рейтинг</div>';
+  }
+}
+
+function renderRating() {
+  const list = $('#rating-list');
+  const sort = RATING_SORTS[ratingSort] || RATING_SORTS.wins;
+  list.innerHTML = '';
+
+  const rows = ratingUsers
+    .filter(u => (u.st.matches || 0) > 0)
+    .filter(u => !sort.eligible || sort.eligible(u.st))
+    .sort((a, b) => sort.value(b.st) - sort.value(a.st) || (b.st.matches || 0) - (a.st.matches || 0));
+
+  if (!rows.length) {
+    list.innerHTML = ratingSort === 'acc'
+      ? `<div class="empty">Пока ни у кого нет ${RATING_MIN_SHOTS} бросков — сыграйте ещё</div>`
+      : '<div class="empty">Сыгранных матчей пока нет</div>';
+    return;
+  }
+
+  rows.forEach((u, i) => {
+    const st = u.st;
+    const val = sort.value(st) + (ratingSort === 'acc' ? '%' : '');
+    const row = document.createElement('div');
+    row.className = 'rate-row' + (u.uid === state.userId ? ' me' : '') + (i < 3 ? ' podium' : '');
+    row.innerHTML = `
+      <div class="rate-place">${i < 3 ? medal(i + 1) : i + 1}</div>
+      ${miniAvatar(u)}
+      <div class="rate-info">
+        <div class="rate-name">${escapeHtml(u.nickname)}${u.uid === state.userId ? ' <span class="me-tag">ты</span>' : ''}</div>
+        <div class="rate-sub">${st.matches || 0} матч. · ${st.wins || 0} побед · ${accuracy(st.hits, st.misses)}% точность</div>
+      </div>
+      <div class="rate-val">${val}<small>${sort.label}</small></div>`;
+    list.appendChild(row);
+  });
+}
+
+/* ================================================================
+   ДОСТИЖЕНИЯ
+   ================================================================ */
+const ACHIEVEMENTS = [
+  { icon: '🏀', name: 'Дебют',          desc: 'Сыграть первый матч',           has: st => (st.matches || 0) >= 1 },
+  { icon: '🎮', name: 'Разыгрался',     desc: 'Сыграть 10 матчей',             has: st => (st.matches || 0) >= 10 },
+  { icon: '🏟️', name: 'Ветеран',        desc: 'Сыграть 50 матчей',             has: st => (st.matches || 0) >= 50 },
+  { icon: '🏆', name: 'Первая победа',  desc: 'Выиграть матч',                 has: st => (st.wins || 0) >= 1 },
+  { icon: '👑', name: 'Чемпион',        desc: 'Выиграть 10 матчей',            has: st => (st.wins || 0) >= 10 },
+  { icon: '💯', name: 'Сотня',          desc: '100 попаданий за всё время',    has: st => (st.hits || 0) >= 100 },
+  { icon: '💎', name: 'Пятьсот очков',  desc: 'Набрать 500 очков',             has: st => (st.points || st.hits || 0) >= 500 },
+  { icon: '🔥', name: 'В огне',         desc: '5 попаданий подряд',            has: st => (st.best || 0) >= 5 },
+  { icon: '☄️', name: 'Не остановить',  desc: '10 попаданий подряд',           has: st => (st.best || 0) >= 10 },
+  { icon: '🎯', name: 'Снайпер',        desc: `Точность 60% (от ${RATING_MIN_SHOTS} бросков)`,
+    has: st => (st.hits || 0) + (st.misses || 0) >= RATING_MIN_SHOTS && accuracy(st.hits, st.misses) >= 60 },
+  { icon: '🦅', name: 'Хирург',         desc: 'Точность 75% (от 50 бросков)',
+    has: st => (st.hits || 0) + (st.misses || 0) >= 50 && accuracy(st.hits, st.misses) >= 75 }
+];
+
+function renderProfileStats(st) {
+  st = st || {};
+  const shots = (st.hits || 0) + (st.misses || 0);
+  const cells = [
+    ['Матчей',   st.matches || 0],
+    ['Побед',    st.wins || 0],
+    ['Поражений', st.losses || 0],
+    ['Очков',    st.points != null ? st.points : (st.hits || 0)],
+    ['Бросков',  shots],
+    ['Точность', accuracy(st.hits, st.misses) + '%'],
+    ['Лучшая серия', st.best || 0],
+    ['Winrate',  st.matches ? Math.round(((st.wins || 0) / st.matches) * 100) + '%' : '0%']
+  ];
+  $('#profile-stats').innerHTML = cells
+    .map(([k, v]) => `<div class="pstat"><b>${v}</b><span>${k}</span></div>`).join('');
+
+  $('#profile-ach').innerHTML = ACHIEVEMENTS.map(a => {
+    const got = a.has(st);
+    return `<div class="ach${got ? ' got' : ''}" title="${escapeHtml(a.desc)}">
+      <div class="ach-ic">${a.icon}</div>
+      <div class="ach-nm">${escapeHtml(a.name)}</div>
+      <div class="ach-ds">${escapeHtml(a.desc)}</div>
+    </div>`;
+  }).join('');
 }
 
 /* ================================================================
