@@ -807,3 +807,43 @@ input[type="time"]::-webkit-calendar-picker-indicator { filter: invert(.7); curs
   text-transform: uppercase; color: var(--cyan-2); opacity: .8;
 }
 .events-more:hover { opacity: 1; text-decoration: underline; }
+
+/* ================================================================
+   РАЗБИВКА ПО ЗОНАМ В ИТОГАХ
+   ================================================================ */
+.r-zones { display: flex; gap: 6px; margin-top: 5px; justify-content: flex-end; }
+.r-zones .z {
+  font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 7px;
+  background: rgba(0,0,0,.26); border: 1px solid var(--hairline); white-space: nowrap;
+}
+.r-zones .z1 { color: var(--cyan-2); }
+.r-zones .z2 { color: var(--gold); }
+.r-zones .z3 { color: var(--accent-2); }
+
+/* ================================================================
+   ГРАФИК ТОЧНОСТИ В ПРОФИЛЕ
+   ================================================================ */
+.spark-wrap { margin-bottom: 6px; }
+.spark {
+  display: flex; align-items: flex-end; gap: 4px; height: 78px; padding: 8px;
+  background: rgba(0,0,0,.24); border: 1px solid var(--hairline); border-radius: 12px;
+}
+.spark-bar {
+  flex: 1; min-width: 0; height: var(--h); border-radius: 4px 4px 2px 2px;
+  background: linear-gradient(180deg, var(--accent-2), var(--accent));
+  position: relative; transition: filter .16s;
+}
+/* Цвет столбика повторяет исход матча — победы видно сразу */
+.spark-bar.win  { background: linear-gradient(180deg, #ffe7a6, var(--gold)); }
+.spark-bar.lose { background: linear-gradient(180deg, #ff92a0, var(--red)); }
+.spark-bar.left { background: linear-gradient(180deg, rgba(255,255,255,.3), rgba(255,255,255,.14)); }
+.spark-bar.solo { background: linear-gradient(180deg, var(--cyan-2), var(--cyan)); }
+.spark-bar i {
+  position: absolute; left: 50%; top: -13px; transform: translateX(-50%);
+  font-style: normal; font-size: 8.5px; font-weight: 700; color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+.spark-foot { font-size: 10.5px; color: var(--faint); margin-top: 6px; }
+.spark-empty { font-size: 12px; color: var(--faint); padding: 18px 0; }
+/* На узком экране подписи над столбиками сливаются — прячем их */
+@media (max-width: 380px) { .spark-bar i { display: none; } }

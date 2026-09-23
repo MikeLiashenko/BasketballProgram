@@ -956,6 +956,15 @@ function openProfile() {
   $('#profile-nick-input').value = state.nickname || '';
   $('#profile-error').textContent = '';
   renderProfileStats(state.stats);
+  renderSpark(historyCache);
+  // История могла быть ещё не загружена — тогда тянем её и дорисовываем график
+  if (!historyCache.length) {
+    db.ref('history/' + state.userId).get().then(snap => {
+      historyCache = Object.entries(snap.val() || {}).map(([_k, h]) => ({ ...h, _k }))
+        .sort((a, b) => (b.time || 0) - (a.time || 0));
+      if (!$('#profile-backdrop').hidden) renderSpark(historyCache);
+    }).catch(() => {});
+  }
   // Переключатели читаются из localStorage, а не из БД: это настройки устройства
   $('#opt-haptics').checked = Haptics.isOn();
   const notifyBox = $('#opt-notify');
@@ -2005,6 +2014,11 @@ function recordShot(result, points) {
 
     if (result === 'hit') {
       const gain = isZones(m) ? Math.max(1, Math.min(3, points || 1)) : 1;
+      if (isZones(m)) {
+        // Разбивка по зонам: из какой точки игрок забивает чаще
+        if (!p.zoneHits) p.zoneHits = {};
+        p.zoneHits['z' + gain] = (p.zoneHits['z' + gain] || 0) + 1;
+      }
       p.hits   = (p.hits || 0) + 1;
       p.points = (p.points != null ? p.points : (p.hits - 1)) + gain;
       p.streak = (p.streak || 0) + 1;
@@ -2096,6 +2110,10 @@ async function undoShot() {
     if (ls.action === 'hit') {
       p.hits   = Math.max(0, (p.hits || 0) - 1);
       p.points = Math.max(0, ptsOf(p) - (ls.points || 1));
+      if (p.zoneHits && ls.points) {
+        const zk = 'z' + ls.points;
+        p.zoneHits[zk] = Math.max(0, (p.zoneHits[zk] || 0) - 1);
+      }
     } else {
       p.misses = Math.max(0, (p.misses || 0) - 1);
     }
@@ -2445,13 +2463,17 @@ function renderResults(m) {
     const score = zones
       ? `<b>${ptsOf(x.p)}</b> очк · ${x.p.hits || 0}/${x.p.misses || 0}`
       : `<b>${x.p.hits || 0}</b> / ${x.p.misses || 0}`;
+    const zh = x.p.zoneHits || {};
+    const zoneTxt = zones && (zh.z1 || zh.z2 || zh.z3)
+      ? `<div class="r-zones">${[1, 2, 3].map(z => `<span class="z z${z}">+${z} × ${zh['z' + z] || 0}</span>`).join('')}</div>`
+      : '';
     const row = document.createElement('div');
     row.className = 'result-row' + (i === 0 && !x.p.left ? ' first' : '');
     row.innerHTML = `
       <div class="rank">${i + 1}</div>
       ${miniAvatar(x.p, true)}
       <div class="r-name">${escapeHtml(x.p.nickname)}${leftTag}</div>
-      <div class="r-score">${score} · ${accuracy(x.p.hits, x.p.misses)}%${x.p.best > 1 ? ' · 🔥' + x.p.best : ''}</div>`;
+      <div class="r-score">${score} · ${accuracy(x.p.hits, x.p.misses)}%${x.p.best > 1 ? ' · 🔥' + x.p.best : ''}${zoneTxt}</div>`;
     list.appendChild(row);
   });
 
@@ -2608,6 +2630,7 @@ function writeHistory(mid, uid, m) {
     userId: id,                                   // нужен для статистики личных встреч
     nickname: x.nickname, avatar: x.avatar || null, color: x.color || null, photo: x.photo || null,
     hits: x.hits || 0, misses: x.misses || 0, points: ptsOf(x), best: x.best || 0,
+    zoneHits: x.zoneHits || null,
     place: x.place || null, left: !!x.left
   })).sort(cmpFinal);
 
@@ -3089,6 +3112,26 @@ const ACHIEVEMENTS = [
   { icon: '📈', name: 'На ходу',        desc: '3 победы подряд',               has: st => (st.bestWinStreak || 0) >= 3 },
   { icon: '🧱', name: 'Стена',          desc: '5 побед подряд',                has: st => (st.bestWinStreak || 0) >= 5 }
 ];
+
+/* График точности: столбик на матч, слева — старые, справа — свежие.
+   Рисуем div-ами, чтобы не тащить ради десяти чисел canvas или библиотеку. */
+function renderSpark(items) {
+  const box = $('#profile-spark');
+  if (!box) return;
+  const data = items.slice(0, 12).reverse()
+    .map(h => ({ acc: accuracy(h.myHits, h.myMisses), res: h.result, time: h.time }));
+
+  if (data.length < 2) {
+    box.innerHTML = '<div class="spark-empty">Сыграй пару матчей — появится график</div>';
+    return;
+  }
+  const avg = Math.round(data.reduce((s2, d) => s2 + d.acc, 0) / data.length);
+  box.innerHTML = `
+    <div class="spark">${data.map(d => `
+      <div class="spark-bar ${d.res}" style="--h:${Math.max(4, d.acc)}%"
+           title="${formatDate(d.time)} — ${d.acc}%"><i>${d.acc}</i></div>`).join('')}</div>
+    <div class="spark-foot">За ${data.length} ${plural(data.length, 'матч', 'матча', 'матчей')} · в среднем ${avg}%</div>`;
+}
 
 function renderProfileStats(st) {
   st = st || {};

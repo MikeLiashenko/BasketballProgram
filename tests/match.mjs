@@ -89,6 +89,8 @@ await step('бросок +3 даёт 3 очка и 1 попадание', async 
   if (p.points !== 3) throw new Error('points=' + p.points);
   if (p.hits !== 1) throw new Error('hits=' + p.hits);
   if (p.streak !== 1) throw new Error('streak=' + p.streak);
+  if (!p.zoneHits || p.zoneHits.z3 !== 1) throw new Error('разбивка по зонам: ' + JSON.stringify(p.zoneHits));
+  if (p.zoneHits.z1 || p.zoneHits.z2) throw new Error('засчитано в чужую зону: ' + JSON.stringify(p.zoneHits));
 });
 
 await step('кнопка отмены появилась', async () => {
@@ -102,9 +104,11 @@ await step('отмена возвращает счёт', async () => {
     const m = Object.values(window.__DB.matches)[0];
     const p = m.players[m.creatorId];
     return { pts: p.points, hits: p.hits, streak: p.streak, last: m.lastShot || null,
+             zones: p.zoneHits || null,
              evs: Object.values(m.events || {}).map(e => e.action) };
   });
   if (st.pts !== 0 || st.hits !== 0) throw new Error('счёт не откатился: ' + JSON.stringify(st));
+  if (st.zones && st.zones.z3 !== 0) throw new Error('зона не откатилась: ' + JSON.stringify(st.zones));
   if (st.last) throw new Error('lastShot не очищен');
   if (st.evs.includes('hit')) throw new Error('событие броска осталось: ' + st.evs);
   if (!st.evs.includes('undo')) throw new Error('нет события отмены');
