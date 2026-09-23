@@ -745,3 +745,7 @@ input[type="time"]::-webkit-calendar-picker-indicator { filter: invert(.7); curs
 
 /* Фильтр истории стоит под шапкой, как и переключатель рейтинга */
 #screen-history .segment.wide { margin: 0 18px; }
+
+/* Сообщение об ошибке внутри модалки профиля прижато к полю ника */
+#profile-error:not(:empty) { margin: 6px 0 2px; }
+#profile-nick-input { text-align: center; }

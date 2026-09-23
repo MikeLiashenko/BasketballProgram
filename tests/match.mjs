@@ -202,12 +202,97 @@ await step('профиль показывает статистику и дост
   await page.waitForTimeout(200);
   const stats = await page.evaluate(() => document.querySelectorAll('.pstat').length);
   const got = await page.evaluate(() => document.querySelectorAll('.ach.got').length);
-  if (stats !== 8) throw new Error('плиток статистики: ' + stats);
+  if (stats !== 10) throw new Error('плиток статистики: ' + stats);
   if (got < 2) throw new Error('зажглось достижений: ' + got);
   await page.screenshot({ path: OUT + '/profile.png' });
 });
 await page.click('#profile-cancel');
 await page.waitForTimeout(200);
+
+console.log('\nСМЕНА НИКА');
+await step('ник нельзя занять чужой', async () => {
+  await page.click('#menu-avatar');
+  await page.waitForTimeout(200);
+  await page.fill('#profile-nick-input', 'Соперник');
+  await page.click('#profile-save');
+  await page.waitForTimeout(400);
+  const err = await page.textContent('#profile-error');
+  if (!/занят/.test(err)) throw new Error('ошибка не показана: ' + err);
+});
+
+await step('короткий ник отклоняется', async () => {
+  await page.fill('#profile-nick-input', 'ab');
+  await page.click('#profile-save');
+  await page.waitForTimeout(200);
+  const err = await page.textContent('#profile-error');
+  if (!/3–16/.test(err)) throw new Error('ошибка не показана: ' + err);
+});
+
+await step('свободный ник сохраняется', async () => {
+  await page.fill('#profile-nick-input', 'Тестер2');
+  await page.click('#profile-save');
+  await page.waitForTimeout(500);
+  await page.click('#modal-ok');
+  await page.waitForTimeout(300);
+  const st = await page.evaluate(() => ({
+    db: window.__DB.users[localStorage.getItem('bb_userId')].nickname,
+    ls: localStorage.getItem('bb_nickname'),
+    head: document.getElementById('menu-nick').textContent
+  }));
+  if (st.db !== 'Тестер2' || st.ls !== 'Тестер2' || st.head !== 'Тестер2') throw new Error(JSON.stringify(st));
+});
+
+console.log('\nТРЕНИРОВКА В ОДИНОЧКУ');
+await step('тренировка стартует сразу', async () => {
+  await page.click('#solo-btn');
+  await page.waitForTimeout(200);
+  await page.click('#modal-cancel');              // без зон
+  await page.waitForSelector('#screen-match.active');
+  const m = await page.evaluate(() => window.__DB.matches[localStorage.getItem('bb_activeMatch')]);
+  if (!m.solo) throw new Error('матч не помечен как тренировка');
+  if (m.status !== 'active') throw new Error('статус: ' + m.status);
+  if (m.shotMode !== 'simple') throw new Error('режим: ' + m.shotMode);
+});
+
+await step('броски в тренировке засчитываются', async () => {
+  await page.click('#btn-hit');
+  await page.waitForTimeout(250);
+  await page.click('#btn-hit');
+  await page.waitForTimeout(250);
+  await page.click('#btn-miss');
+  await page.waitForTimeout(250);
+  const p = await page.evaluate(() => {
+    const m = window.__DB.matches[localStorage.getItem('bb_activeMatch')];
+    return m.players[m.creatorId];
+  });
+  if (p.hits !== 2 || p.misses !== 1) throw new Error(JSON.stringify(p));
+});
+
+let beforeSolo = null;
+await step('итоги тренировки без победителя', async () => {
+  beforeSolo = await page.evaluate(() => window.__DB.users[localStorage.getItem('bb_userId')].stats);
+  await page.click('#finish-btn');
+  await page.waitForTimeout(200);
+  await page.click('#modal-ok');
+  await page.waitForSelector('#screen-results.active');
+  const title = await page.textContent('#results-title');
+  if (!/тренировк/i.test(title)) throw new Error('заголовок: ' + title);
+  const banner = await page.textContent('#results-winner');
+  if (/🏆/.test(banner)) throw new Error('показан кубок победителя');
+  if (await page.isVisible('#results-rematch-btn')) throw new Error('предложен реванш');
+});
+
+await step('тренировка не даёт побед, но копит броски', async () => {
+  await page.waitForTimeout(400);
+  const after = await page.evaluate(() => window.__DB.users[localStorage.getItem('bb_userId')].stats);
+  if (after.wins !== beforeSolo.wins) throw new Error('победы изменились: ' + beforeSolo.wins + ' → ' + after.wins);
+  if (after.losses !== beforeSolo.losses) throw new Error('поражения изменились');
+  if (after.hits !== beforeSolo.hits + 2) throw new Error('попадания: ' + after.hits);
+  if (after.matches !== beforeSolo.matches + 1) throw new Error('матчи не выросли');
+});
+
+await page.evaluate(() => goMenu());
+await page.waitForTimeout(300);
 
 console.log('\nМАТЧ НА ВРЕМЯ');
 await step('часы идут и матч закрывается по истечении времени', async () => {

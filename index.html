@@ -90,8 +90,9 @@
         </div>
       </main>
 
-      <footer class="menu-footer">
+      <footer class="menu-footer stack">
         <button id="create-btn" class="btn btn-accent btn-big"><span class="ball-spin">🏀</span> Создать матч</button>
+        <button id="solo-btn" class="btn btn-ghost">🎯 Тренировка в одиночку</button>
       </footer>
     </section>
 
@@ -387,6 +388,7 @@
         <button type="button" class="seg-btn" data-sort="streak">Серия</button>
       </div>
       <main class="menu-body">
+        <input id="rating-search" class="field search-input" type="text" placeholder="🔍  Поиск по нику..." autocomplete="off" />
         <div id="rating-list" class="rating-list"></div>
       </main>
     </section>
@@ -447,6 +449,10 @@
       <input type="file" id="prof-photo-file" accept="image/jpeg, image/png, image/webp" hidden />
       
       <div class="modal-text" id="profile-nick">Профиль</div>
+
+      <div class="picker-label">Никнейм</div>
+      <input id="profile-nick-input" class="field" type="text" maxlength="16" autocomplete="off" placeholder="Никнейм" />
+      <div id="profile-error" class="error-msg"></div>
 
       <div class="picker-label">Статистика</div>
       <div class="prof-stats" id="profile-stats"></div>
