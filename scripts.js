@@ -49,6 +49,8 @@ let lobbyMatch = null;      // последнее состояние матча 
 let lobbyIntervalId = null; // тик обратного отсчёта в лобби
 let editingMatchId = null;  // id матча, открытого в модалке редактирования
 let lastRenderedMatch = null; // последнее состояние матча, показанное на экране (для проверки хода в момент клика)
+let presenceRefs = {};        // слушатели «в сети» по игрокам лобби
+let presenceOnline = {};      // их последнее состояние
 let pendingJoin = null;       // matchId из ссылки ?join=, ждёт входа в аккаунт
 let recentOpponents = [];     // недавние соперники для быстрого выбора в мастере
 let historyCache = [];        // выгруженная история — по ней строятся фильтр и личные встречи
@@ -93,8 +95,10 @@ function hashPin(pin) {
 }
 
 /* ---------- Аватары / цвета ---------- */
-const AVATARS = ['🏀','🔥','⚡','🐉','🦁','🦅','🐺','🦈','👑','⭐','💪','🎯','🚀','🐻','🦊','😎','👽','🤖','🐸','🦖','🍀','🌟'];
-const COLORS  = ['#ff6a2b','#ff556a','#ffd257','#2fe08a','#45d6ff','#9d8bff','#ff8ac2','#5bd1c4','#a3e635','#f97316','#38bdf8','#c084fc'];
+const AVATARS = ['🏀','🔥','⚡','🐉','🦁','🦅','🐺','🦈','👑','⭐','💪','🎯','🚀','🐻','🦊','😎','👽','🤖','🐸','🦖','🍀','🌟',
+                 '🦄','🐯','🦍','🐙','🦂','🌪️','💎','🎸','🥷','🧊','☄️','🍕','🐔','🦔','🎲','🧨'];
+const COLORS  = ['#ff6a2b','#ff556a','#ffd257','#2fe08a','#45d6ff','#9d8bff','#ff8ac2','#5bd1c4','#a3e635','#f97316','#38bdf8','#c084fc',
+                 '#f43f5e','#14b8a6','#eab308','#8b5cf6','#22c55e','#0ea5e9','#fb7185','#facc15'];
 
 let regAvatar = AVATARS[0];
 let regColor  = COLORS[0];
@@ -803,6 +807,11 @@ function bindEvents() {
   $('#btn-miss').addEventListener('click', () => recordShot('miss'));
   $('#finish-btn').addEventListener('click', finishMatch);
   $('#leave-btn').addEventListener('click', leaveMatch);
+  $('#match-log-btn').addEventListener('click', () => {
+    // Из идущего матча ролик ещё не собрать — открываем только текст
+    const m = lastRenderedMatch;
+    openMatchLog(m && m.events ? Object.values(m.events) : [], null);
+  });
   $('#undo-btn').addEventListener('click', undoShot);
   $('#pause-btn').addEventListener('click', togglePause);
   $$('#zones-bar .zone').forEach(b => b.addEventListener('click', () => recordShot('hit', +b.dataset.pts)));
@@ -1648,15 +1657,49 @@ function renderLobby(m) {
     else                              badge = '<span class="badge waiting">ожидание</span>';
     const row = document.createElement('div');
     row.className = 'lobby-row';
+    row.dataset.uid = uid;
     row.innerHTML = `
       <div class="l-avatar" style="${avatarBg(colorOf(p))}">${faceOf(p)}</div>
+      <span class="status-dot${presenceOnline[uid] ? ' online' : ''}"></span>
       <span class="l-name">${escapeHtml(p.nickname)}</span>${badge}`;
+
+    // Создатель может убрать того, кто так и не зашёл
+    if (isCreator && uid !== m.creatorId && p.status !== 'joined') {
+      const kick = document.createElement('button');
+      kick.className = 'lobby-kick';
+      kick.type = 'button';
+      kick.title = 'Убрать из матча';
+      kick.textContent = '✕';
+      kick.addEventListener('click', () => kickFromLobby(uid, p.nickname));
+      row.appendChild(kick);
+    }
     box.appendChild(row);
   });
 
+  watchLobbyPresence(Object.keys(m.players));
   lobbyMatch = m;
   refreshStartBtn();
   if (!lobbyIntervalId) lobbyIntervalId = setInterval(refreshStartBtn, 1000);
+}
+
+/* Убрать из лобби приглашённого, который не зашёл: у него пропадёт приглашение,
+   а список перестанет ждать лишнего человека. */
+async function kickFromLobby(uid, nick) {
+  const mid = state.currentMatchId;
+  if (!mid) return;
+  if (!await showConfirm(`Убрать ${nick} из матча?`, 'Убрать', '🚪')) return;
+  await db.ref('matches/' + mid).transaction(m => {
+    if (!m || m.status !== 'lobby') return m;
+    if (m.creatorId !== state.userId) return;
+    const p = m.players && m.players[uid];
+    if (!p || p.status === 'joined') return;   // зашедшего уже не выставляем
+    delete m.players[uid];
+    return m;
+  });
+  await db.ref().update({
+    ['invites/' + uid + '/' + mid]: null,
+    ['userMatches/' + uid + '/' + mid]: null
+  });
 }
 
 // Состояние кнопки «Начать»: гейт по времени старта + «начать с теми, кто есть»
@@ -1686,6 +1729,32 @@ function refreshStartBtn() {
 function stopLobbyTimer() {
   if (lobbyIntervalId) { clearInterval(lobbyIntervalId); lobbyIntervalId = null; }
   lobbyMatch = null;
+  stopLobbyPresence();
+}
+
+/* Кто из приглашённых сейчас в сети. Слушаем по одному флагу на игрока,
+   а не весь узел users — в лобби людей единицы. */
+function stopLobbyPresence() {
+  Object.values(presenceRefs).forEach(r => r.off());
+  presenceRefs = {};
+  presenceOnline = {};
+}
+
+function watchLobbyPresence(uids) {
+  // Отписываемся от тех, кого в матче уже нет
+  Object.keys(presenceRefs).forEach(uid => {
+    if (uids.indexOf(uid) === -1) { presenceRefs[uid].off(); delete presenceRefs[uid]; delete presenceOnline[uid]; }
+  });
+  uids.forEach(uid => {
+    if (presenceRefs[uid]) return;
+    const ref = db.ref('users/' + uid + '/online');
+    presenceRefs[uid] = ref;
+    ref.on('value', snap => {
+      presenceOnline[uid] = !!snap.val();
+      const dot = document.querySelector('.lobby-row[data-uid="' + uid + '"] .status-dot');
+      if (dot) dot.classList.toggle('online', presenceOnline[uid]);
+    });
+  });
 }
 
 async function startMatch() {
@@ -2382,7 +2451,7 @@ function renderResults(m) {
       <div class="rank">${i + 1}</div>
       ${miniAvatar(x.p, true)}
       <div class="r-name">${escapeHtml(x.p.nickname)}${leftTag}</div>
-      <div class="r-score">${score} · ${accuracy(x.p.hits, x.p.misses)}%</div>`;
+      <div class="r-score">${score} · ${accuracy(x.p.hits, x.p.misses)}%${x.p.best > 1 ? ' · 🔥' + x.p.best : ''}</div>`;
     list.appendChild(row);
   });
 
@@ -2543,7 +2612,8 @@ function writeHistory(mid, uid, m) {
   })).sort(cmpFinal);
 
   let result;
-  if (p.left)                  result = 'left';
+  if (m.solo)                  result = 'solo';   // сам с собой — ни победы, ни поражения
+  else if (p.left)             result = 'left';
   else if (m.winnerId === uid) result = 'win';
   else                         result = 'lose';
 
@@ -2603,7 +2673,8 @@ function renderHistory() {
   const entries = historyCache.filter(h =>
     historyFilter === 'all' ? true :
     historyFilter === 'win' ? h.result === 'win' :
-    h.result !== 'win');          // «Поражения» включают и матчи, из которых вышли
+    // «Поражения» включают и матчи, из которых вышли, но не тренировки
+    (h.result === 'lose' || h.result === 'left'));
   empty.style.display = entries.length ? 'none' : 'block';
   if (!entries.length && historyCache.length) {
     empty.querySelector('div:last-child').textContent = 'В этой подборке пусто';
@@ -2617,7 +2688,8 @@ function renderHistory() {
     if (h.shotMode === 'zones') modeTxt += ' · 🎖️ зоны';
 
     let resultTxt, resultCls;
-    if (h.result === 'win')       { resultTxt = '🏆 Победа'; resultCls = 'win'; }
+    if (h.result === 'solo')      { resultTxt = '🎯 Тренировка'; resultCls = 'solo'; }
+    else if (h.result === 'win')  { resultTxt = '🏆 Победа'; resultCls = 'win'; }
     else if (h.result === 'left') { resultTxt = '🚪 Вышел из матча'; resultCls = 'left'; }
     else                          { resultTxt = h.place ? `${medal(h.place)} ${h.place}-е место` : '💪 Поражение'; resultCls = 'lose'; }
 

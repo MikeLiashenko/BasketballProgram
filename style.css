@@ -479,10 +479,13 @@ input[type="time"]::-webkit-calendar-picker-indicator { filter: invert(.7); curs
 .history-card::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--hairline-2); }
 .history-card.win::before  { background: var(--gold); }
 .history-card.left::before { background: var(--faint); }
+/* Тренировка — нейтральная: это ни победа, ни поражение */
+.history-card.solo::before { background: var(--cyan); }
 .hc-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
 .hc-result { font-weight: 700; font-size: 15px; display: flex; align-items: center; gap: 6px; letter-spacing: -0.01em; }
 .history-card.win .hc-result  { color: var(--gold); }
 .history-card.left .hc-result { color: var(--muted); }
+.history-card.solo .hc-result { color: var(--cyan-2); }
 .hc-date { font-size: 11.5px; color: var(--faint); white-space: nowrap; }
 .hc-name { font-size: 14px; font-weight: 700; letter-spacing: -0.01em; margin-bottom: 6px; }
 .hc-mode { font-size: 12.5px; color: var(--muted); font-weight: 500; margin-bottom: 11px; }
@@ -780,3 +783,27 @@ input[type="time"]::-webkit-calendar-picker-indicator { filter: invert(.7); curs
    видео идут в разметке ниже, поэтому при равном z-index они перекрывали
    диалог, и до его кнопок нельзя было дотянуться. */
 #modal-backdrop { z-index: 60; }
+
+/* ================================================================
+   ЛОББИ: КТО В СЕТИ И УДАЛЕНИЕ ПРИГЛАШЁННОГО
+   ================================================================ */
+.lobby-row { position: relative; }
+.lobby-row .status-dot { flex: none; }
+.lobby-kick {
+  margin-left: auto; flex: none; width: 28px; height: 28px; cursor: pointer;
+  border-radius: 9px; border: 1px solid var(--hairline); background: var(--glass);
+  color: var(--muted); font-size: 13px; line-height: 1;
+  transition: background .18s, color .18s, transform .12s var(--ease);
+}
+.lobby-kick:hover  { background: rgba(251,113,133,.16); color: var(--red); border-color: rgba(251,113,133,.4); }
+.lobby-kick:active { transform: scale(.9); }
+
+/* Заголовок ленты матча со ссылкой на полный лог */
+.events-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
+.events-head .events-title { margin-bottom: 0; }
+.events-more {
+  flex: none; cursor: pointer; border: none; background: none; padding: 0;
+  font-family: var(--font); font-size: 11px; font-weight: 600; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--cyan-2); opacity: .8;
+}
+.events-more:hover { opacity: 1; text-decoration: underline; }
