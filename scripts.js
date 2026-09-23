@@ -12,7 +12,9 @@ firebase.initializeApp(firebaseConfig);
 const db = firebase.database();
 const TS = firebase.database.ServerValue.TIMESTAMP;
 
-// Смещение серверных часов — чтобы таймер хода был одинаковым у всех клиентов
+// Смещение серверных часов. Все метки времени в матче (события, старт хода,
+// finishedAt) считаем через serverNow() — иначе у игрока со сбитыми часами лента
+// событий перемешивается, а таймер хода врёт.
 let serverOffset = 0;
 db.ref('.info/serverTimeOffset').on('value', s => { serverOffset = s.val() || 0; });
 function serverNow() { return Date.now() + serverOffset; }
@@ -26,6 +28,7 @@ const state = {
   nickname: null,
   avatar: null,
   color: null,
+  photo: null,
   currentMatchId: null,
   wizard: { goalType: null, targetHits: 10, selected: {} } // selected: { userId: {nickname, avatar, color} }
 };
@@ -52,6 +55,15 @@ let logVideoSource = null;    // запись истории, открытая �
    ================================================================ */
 const $  = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
+
+// Ключи localStorage. Сессию чистим точечно — настройки (звук, тема) переживают выход.
+const LS = {
+  userId: 'bb_userId', nickname: 'bb_nickname', activeMatch: 'bb_activeMatch',
+  muted: 'bb_muted', theme: 'bb_theme', notify: 'bb_notify', haptics: 'bb_haptics'
+};
+function clearSession() {
+  [LS.userId, LS.nickname, LS.activeMatch].forEach(k => localStorage.removeItem(k));
+}
 
 function uuid() {
   if (crypto && crypto.randomUUID) return crypto.randomUUID();
@@ -96,32 +108,50 @@ function shade(hex, pct) {
 
 // obj — user или player-запись (может иметь avatar/color/nickname)
 function colorOf(obj) { return (obj && obj.color) || colorFromString((obj && obj.nickname) || ''); }
-function faceOf(obj) { 
-  if (obj && obj.photo) return `<img src="${obj.photo}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;display:block;border:none;">`;
-  return escapeHtml((obj && obj.avatar) || ((obj && obj.nickname) ? obj.nickname.charAt(0) : '?')); 
+function faceOf(obj) {
+  if (obj && obj.photo) return `<img class="ava-img" src="${escapeHtml(obj.photo)}" alt="">`;
+  return escapeHtml((obj && obj.avatar) || ((obj && obj.nickname) ? obj.nickname.charAt(0) : '?'));
 }
 
-// Функция сжатия фото до 120x120 px
+// Сжатие фото до квадрата 128×128 — чтобы аватар весил килобайты, а не мегабайты.
+const PHOTO_MAX_BYTES = 10 * 1024 * 1024;  // больше 10 МБ даже не читаем
+const PHOTO_SIDE = 128;
+
 function compressImage(file, callback) {
-  if (!file || !file.type.startsWith('image/')) return;
+  if (!file) return;
+  if (!file.type || !file.type.startsWith('image/')) { showAlert('Это не картинка', '🖼️'); return; }
+  if (file.size > PHOTO_MAX_BYTES) { showAlert('Фото слишком большое — до 10 МБ', '🖼️'); return; }
+
   const reader = new FileReader();
+  reader.onerror = () => showAlert('Не удалось прочитать файл', '⚠️');
   reader.onload = e => {
     const img = new Image();
+    img.onerror = () => showAlert('Не удалось открыть картинку', '⚠️');
     img.onload = () => {
+      // Кадрируем по центру в квадрат — аватар везде круглый, растягивать нельзя
+      const side = Math.min(img.width, img.height);
+      const sx = (img.width - side) / 2, sy = (img.height - side) / 2;
       const cvs = document.createElement('canvas');
-      const max = 120;
-      let w = img.width, h = img.height;
-      if (w > h) { if (w > max) { h *= max / w; w = max; } } else { if (h > max) { w *= max / h; h = max; } }
-      cvs.width = w; cvs.height = h;
-      cvs.getContext('2d').drawImage(img, 0, 0, w, h);
-      callback(cvs.toDataURL('image/jpeg', 0.85)); // Переводим в легкий base64
+      cvs.width = cvs.height = PHOTO_SIDE;
+      const ctx = cvs.getContext('2d');
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(img, sx, sy, side, side, 0, 0, PHOTO_SIDE, PHOTO_SIDE);
+      let out = cvs.toDataURL('image/jpeg', 0.82);
+      // Firebase не любит гигантские строки в каждом узле игрока — дожимаем при нужде
+      if (out.length > 40000) out = cvs.toDataURL('image/jpeg', 0.6);
+      callback(out);
     };
     img.src = e.target.result;
   };
   reader.readAsDataURL(file);
 }
 function avatarBg(color) { const c = color || '#888'; return `background:linear-gradient(135deg, ${c}, ${shade(c, -30)});`; }
-function hexA(hex, a) { const n = parseInt((hex || '#888888').slice(1), 16); return `rgba(${n >> 16},${(n >> 8) & 255},${n & 255},${a})`; }
+function hexA(hex, a) {
+  let h = String(hex || '').trim();
+  if (!/^#[0-9a-f]{6}$/i.test(h)) h = '#888888';
+  const n = parseInt(h.slice(1), 16);
+  return `rgba(${n >> 16},${(n >> 8) & 255},${n & 255},${a})`;
+}
 
 // Готовый HTML мини-аватара для списков
 function miniAvatar(obj, small) {
@@ -303,7 +333,7 @@ function launchConfetti() {
    ================================================================ */
 const Sound = (() => {
   let ctx = null;
-  let muted = localStorage.getItem('bb_muted') === '1';
+  let muted = localStorage.getItem(LS.muted) === '1';
 
   function ac() {
     if (!ctx) { try { ctx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { return null; } }
@@ -330,7 +360,7 @@ const Sound = (() => {
   return {
     resume() { ac(); },
     isMuted() { return muted; },
-    toggle() { muted = !muted; localStorage.setItem('bb_muted', muted ? '1' : '0'); return muted; },
+    toggle() { muted = !muted; localStorage.setItem(LS.muted, muted ? '1' : '0'); return muted; },
     click()  { if (!muted) tone(330, 0, 0.05, 'square', 0.05, 240); },
     hit()    { if (!muted) { tone(660, 0, 0.12, 'sine', 0.16, 990); tone(990, 0.05, 0.16, 'sine', 0.12, 1320); } },
     miss()   { if (!muted) tone(220, 0, 0.22, 'sawtooth', 0.14, 90); },
@@ -374,24 +404,30 @@ function init() {
   bindEvents();
   updateSoundIcon();
   setupRegPickers();
-  const uid = localStorage.getItem('bb_userId');
-  const nick = localStorage.getItem('bb_nickname');
+  const uid = localStorage.getItem(LS.userId);
+  const nick = localStorage.getItem(LS.nickname);
   if (uid && nick) {
     state.userId = uid;
     state.nickname = nick;
-    resumeUser().then(resumeOrMenu);
+    resumeUser().then(resumeOrMenu).catch(e => {
+      // Аккаунт пропал или БД недоступна — не оставляем пользователя на пустом экране
+      if (e && e.message === 'account-missing') return;
+      console.error(e);
+      showScreen('screen-login');
+      $('#login-error').textContent = 'Нет связи с базой — попробуй ещё раз';
+    });
   } else {
     showScreen('screen-login');
     $('#login-nick').focus();
   }
-  
 }
 
 async function resumeUser() {
   const snap = await db.ref('users/' + state.userId).get();
   if (!snap.exists()) {
-    // Аккаунт удалён из БД — вернём на экран входа
-    localStorage.clear();
+    // Аккаунт удалён из БД — вернём на экран входа (настройки при этом сохраняем)
+    clearSession();
+    state.userId = null; state.nickname = null;
     showScreen('screen-login');
     throw new Error('account-missing');
   }
@@ -405,7 +441,7 @@ async function resumeUser() {
 
 // Если был активный матч — вернуться в него, иначе меню
 async function resumeOrMenu() {
-  const activeId = localStorage.getItem('bb_activeMatch');
+  const activeId = localStorage.getItem(LS.activeMatch);
   if (activeId) {
     const snap = await db.ref('matches/' + activeId).get();
     const m = snap.val();
@@ -414,7 +450,7 @@ async function resumeOrMenu() {
       enterMatch(activeId);
       return;
     }
-    localStorage.removeItem('bb_activeMatch');
+    localStorage.removeItem(LS.activeMatch);
   }
   goMenu();
 }
@@ -717,8 +753,8 @@ async function doAuth() {
 }
 
 function loginLocal(userId, nick) {
-  localStorage.setItem('bb_userId', userId);
-  localStorage.setItem('bb_nickname', nick);
+  localStorage.setItem(LS.userId, userId);
+  localStorage.setItem(LS.nickname, nick);
   state.userId = userId;
   state.nickname = nick;
   setupPresence();
@@ -731,9 +767,9 @@ async function logout() {
   try { await db.ref('users/' + state.userId + '/online').set(false); } catch (e) {}
   stopMenuWatch();
   stopMatchWatch();
-  localStorage.removeItem('bb_userId');
-  localStorage.removeItem('bb_nickname');
-  localStorage.removeItem('bb_activeMatch');
+  stopTurnTimer();
+  stopLobbyTimer();
+  clearSession();
   state.userId = null; state.nickname = null; state.currentMatchId = null;
   setAuthMode('login');
   $('#login-nick').value = ''; $('#login-pin').value = '';
@@ -758,7 +794,7 @@ function goMenu() {
   stopTurnTimer();
   stopLobbyTimer();
   state.currentMatchId = null;
-  localStorage.removeItem('bb_activeMatch');
+  localStorage.removeItem(LS.activeMatch);
   prevInviteCount = -1; // сброс базовой линии, чтобы не пикать на первом снимке
   showScreen('screen-menu');
   watchMenu();
@@ -824,6 +860,7 @@ async function acceptInvite(matchId) {
   const snap = await db.ref('matches/' + matchId).get();
   const m = snap.val();
   await db.ref('invites/' + state.userId + '/' + matchId).remove();
+  db.ref('userMatches/' + state.userId + '/' + matchId).set(true);
 
   if (!m || m.status === 'finished') { showAlert('Матч уже завершён', '⚠️'); return; }
 
@@ -836,7 +873,7 @@ async function acceptInvite(matchId) {
   }
 
   // Матч уже идёт — присоединяемся на ходу (поздний вход)
-  const now = Date.now();
+  const now = serverNow();
   await db.ref('matches/' + matchId).transaction(mm => {
     if (!mm || mm.status !== 'active') return mm;
     if (!mm.players) mm.players = {};
@@ -985,6 +1022,8 @@ async function createMatch() {
   await db.ref('matches/' + matchId).set(match);
 
   const updates = {};
+  // Индекс «матчи игрока»: без него экран «Мои матчи» тянул бы всё дерево matches
+  Object.keys(players).forEach(uid => { updates['userMatches/' + uid + '/' + matchId] = true; });
   selectedIds.forEach(uid => {
     updates['invites/' + uid + '/' + matchId] = {
       name: matchName,
@@ -1009,7 +1048,7 @@ function enterMatch(matchId) {
   lastEventTime = null;   // не проигрывать анимации для уже существующих событий
   confettiFor = null;
   prevMatchStatus = null;
-  localStorage.setItem('bb_activeMatch', matchId);
+  localStorage.setItem(LS.activeMatch, matchId);
   matchWatchRef = db.ref('matches/' + matchId);
   matchWatchRef.on('value', onMatchValue);
 }
@@ -1126,7 +1165,7 @@ async function startMatch() {
   });
 
   if (started && res.committed && res.snapshot.exists()) {
-    db.ref('matches/' + mid + '/events').push({ time: Date.now(), userId: '', action: 'start', text: '🏀 Матч начался!' });
+    db.ref('matches/' + mid + '/events').push({ time: serverNow(), userId: '', action: 'start', text: '🏀 Матч начался!' });
   }
 }
 
@@ -1243,12 +1282,10 @@ function renderMatch(m) {
 }
 
 /* Записать бросок — в транзакции (защита от гонок) */
-/* Записать бросок — в транзакции (защита от гонок) */
-/* Записать бросок — в транзакции (защита от гонок) */
 function recordShot(result) {
   const mid = state.currentMatchId;
   const ref = db.ref('matches/' + mid);
-  const now = Date.now();
+  const now = serverNow();
 
   // Кого мы ВИДЕЛИ активным в момент клика. Если пока транзакция летит на
   // сервер, ход уже сменится (например, гонка с авто-промахом по таймеру),
@@ -1399,10 +1436,10 @@ function expireTurn(mid, expectedStartedAt, seconds) {
     p.streak = 0;
     if (!m.events) m.events = {};
     const k = db.ref().push().key;
-    m.events[k] = { time: Date.now(), userId: activeUid, action: 'miss', text: `${p.nickname} не успел — промах` };
+    m.events[k] = { time: serverNow(), userId: activeUid, action: 'miss', text: `${p.nickname} не успел — промах` };
 
     const next = findNextTurn(m, m.currentTurnIndex);
-    if (next === -1) { m.status = 'finished'; m.winnerId = computeWinner(m); m.finishedAt = Date.now(); }
+    if (next === -1) { m.status = 'finished'; m.winnerId = computeWinner(m); m.finishedAt = serverNow(); }
     else { m.currentTurnIndex = next; m.turnStartedAt = serverNow(); }
     return m;
   });
@@ -1413,7 +1450,6 @@ function winnerByPlace(m) {
   return null;
 }
 
-// Победитель: место #1, иначе лучший счёт среди участников
 // Победитель: место #1, иначе лучший счёт среди участников
 function computeWinner(m) {
   const byPlace = winnerByPlace(m);
@@ -1461,7 +1497,7 @@ async function finishMatch() {
     if (!m || m.status === 'finished') return m;
     m.status = 'finished';
     m.winnerId = computeWinner(m);
-    m.finishedAt = Date.now();
+    m.finishedAt = serverNow();
     return m;
   });
 }
@@ -1486,7 +1522,7 @@ async function leaveMatch() {
         const pl = m.players[uid];
         return pl && !pl.finished && !pl.left;
       }).length;
-      if (playing <= 1) { m.status = 'finished'; m.winnerId = computeWinner(m); m.finishedAt = Date.now(); }
+      if (playing <= 1) { m.status = 'finished'; m.winnerId = computeWinner(m); m.finishedAt = serverNow(); }
       else if (wasActive) {
         const next = findNextTurn(m, m.currentTurnIndex);
         if (next !== -1) { m.currentTurnIndex = next; m.turnStartedAt = serverNow(); }
@@ -1498,7 +1534,7 @@ async function leaveMatch() {
   if (res.committed && res.snapshot && res.snapshot.exists()) {
     const m = res.snapshot.val();
     db.ref('matches/' + mid + '/events').push({
-      time: Date.now(), userId: myId, action: 'leave', text: `${state.nickname} вышел из матча`
+      time: serverNow(), userId: myId, action: 'leave', text: `${state.nickname} вышел из матча`
     });
     // Финализируем (статистика + история), ТОЛЬКО если матч из-за выхода завершился.
     // Иначе матч продолжается и остаётся в «Мои матчи» — можно вернуться.
@@ -1506,7 +1542,7 @@ async function leaveMatch() {
   }
 
   stopMatchWatch();
-  localStorage.removeItem('bb_activeMatch');
+  localStorage.removeItem(LS.activeMatch);
   state.currentMatchId = null;
   goMenu();
 }
@@ -1582,6 +1618,9 @@ async function finalizePlayer(mid, uid, m) {
 
   // 2. Запись в историю этого игрока
   writeHistory(mid, uid, m);
+
+  // 3. Матч больше не активный — убираем из индекса «Мои матчи»
+  db.ref('userMatches/' + uid + '/' + mid).remove();
 }
 
 function writeHistory(mid, uid, m) {
@@ -1702,7 +1741,7 @@ function renderHistory(obj) {
     card.querySelector('.hc-del-btn').addEventListener('click', () => deleteHistory(h, card));
     list.appendChild(card);
   });
-  }
+}
 
 /* ================================================================
    ЭКРАН 8 — МОИ МАТЧИ (сохранённые/идущие, куда можно вернуться)
@@ -1710,19 +1749,29 @@ function renderHistory(obj) {
 async function openMyMatches() {
   showScreen('screen-mymatches');
   const list = $('#mymatches-list');
-  list.innerHTML = '';
-  const snap = await db.ref('matches').get();
-  const all = snap.val() || {};
+  list.innerHTML = '<div class="empty">Загружаем…</div>';
+
+  // Читаем только свои матчи — по индексу userMatches, а не всё дерево matches
+  const idxSnap = await db.ref('userMatches/' + state.userId).get();
+  const ids = Object.keys(idxSnap.val() || {});
+  const snaps = await Promise.all(ids.map(id => db.ref('matches/' + id).get()));
+
   const mine = [];
-  for (const [id, m] of Object.entries(all)) {
-    if (!m || !m.players || !m.players[state.userId]) continue;
+  const stale = {};
+  snaps.forEach((snap, i) => {
+    const id = ids[i], m = snap.val();
+    // Матча нет или меня в нём нет — чистим протухший индекс
+    if (!m || !m.players || !m.players[state.userId]) { stale['userMatches/' + state.userId + '/' + id] = null; return; }
     if (m.status === 'finished') {
       // Ленивая финализация: матч завершился, пока меня не было — засчитать в историю
       if (!m.players[state.userId].counted) finalizePlayer(id, state.userId, m);
-      continue; // завершённые здесь не показываем — они в «Истории»
+      stale['userMatches/' + state.userId + '/' + id] = null; // завершённые живут в «Истории»
+      return;
     }
     mine.push({ id, m });
-  }
+  });
+  if (Object.keys(stale).length) db.ref().update(stale);
+
   mine.sort((a, b) => (b.m.createdAt || 0) - (a.m.createdAt || 0));
   renderMyMatches(mine);
 }
@@ -1803,7 +1852,7 @@ async function reenterMatch(id, m) {
       if (mm.turnOrder.indexOf(state.userId) === -1) mm.turnOrder.push(state.userId);
       if (!mm.events) mm.events = {};
       const k = db.ref().push().key;
-      mm.events[k] = { time: Date.now(), userId: state.userId, action: 'join', text: `${state.nickname} вернулся` };
+      mm.events[k] = { time: serverNow(), userId: state.userId, action: 'join', text: `${state.nickname} вернулся` };
       return mm;
     });
   }
@@ -1813,7 +1862,10 @@ async function reenterMatch(id, m) {
 async function deleteMatch(id, m) {
   if (!await showConfirm('Удалить матч? Он исчезнет у всех приглашённых.', 'Удалить', '🗑️')) return;
   const updates = { ['matches/' + id]: null };
-  Object.keys(m.players || {}).forEach(uid => { updates['invites/' + uid + '/' + id] = null; });
+  Object.keys(m.players || {}).forEach(uid => {
+    updates['invites/' + uid + '/' + id] = null;
+    updates['userMatches/' + uid + '/' + id] = null;
+  });
   await db.ref().update(updates);
   openMyMatches();
 }
@@ -1883,8 +1935,8 @@ async function saveEditMatch() {
     18.0 (40)  конец
    ================================================================ */
 const MatchVideo = (() => {
-  const AUDIO_FILE  = 'Ogryzek - AURA (super slowed + reverb).mp3';
-  const AUDIO_START = 22;                 // с какой секунды трека стартуем
+  const AUDIO_CLIP_SCRIPT = 'audio-clip.js?v=25'; // 18 с трека (с 22-й секунды) в base64
+  const AUDIO_START = 22;                 // с какой секунды трека вырезан клип
   const W = 720, H = 1280, FPS = 30, DUR = 18;
 
   // Ключевые точки сюжета в секундах ВИДЕО (= секунда трека − AUDIO_START)
@@ -2705,11 +2757,12 @@ const MatchVideo = (() => {
   }
 
   /* ================= ЗВУК =================
-     Музыку берём из вшитого куска (audio-clip.js) и декодируем в AudioBuffer.
+     Музыку берём из вшитого куска (audio-clip.js, 18 с с 22-й секунды трека)
+     и декодируем в AudioBuffer.
      Через <audio> + createMediaElementSource делать НЕЛЬЗЯ: если mp3 лежит
      рядом на file:// или на другом origin, узел по правилам CORS отдаёт в граф
      тишину — видео писалось немым. Декодированный буфер таких ограничений не
-     имеет, и заодно не надо тянуть 6.5 МБ ради 18 секунд.                    */
+     имеет, и заодно не надо тянуть полный трек ради 18 секунд.                    */
   async function setupAudio() {
     try {
       if (!AC) AC = new (window.AudioContext || window.webkitAudioContext)();
@@ -2723,32 +2776,32 @@ const MatchVideo = (() => {
         gainNode.connect(monitor);       // чтобы поймать немую дорожку и честно об этом сказать
       }
       if (!audioBuf) {
-        const data = (typeof VIDEO_AUDIO_CLIP !== 'undefined') ? VIDEO_AUDIO_CLIP : null;
+        const data = await loadClipScript();
         if (data) {
           const bytes = await (await fetch(data)).arrayBuffer();
           audioBuf = await AC.decodeAudioData(bytes);
-        } else {
-          audioBuf = await loadFullTrack();   // запасной путь: полный mp3 рядом
+          analyzeAudio(audioBuf);
         }
-        if (audioBuf) analyzeAudio(audioBuf);
       }
       return !!audioBuf;
     } catch (e) { return false; }
   }
 
-  // Запасной путь, если audio-clip.js не подключён: тянем полный трек и режем с 22-й секунды
-  async function loadFullTrack() {
-    try {
-      const bytes = await (await fetch(encodeURI(AUDIO_FILE))).arrayBuffer();
-      const full = await AC.decodeAudioData(bytes);
-      const from = Math.min(AUDIO_START, Math.max(0, full.duration - DUR));
-      const len  = Math.min(Math.floor(DUR * full.sampleRate), full.length - Math.floor(from * full.sampleRate));
-      const out  = AC.createBuffer(full.numberOfChannels, len, full.sampleRate);
-      for (let ch = 0; ch < full.numberOfChannels; ch++) {
-        out.copyToChannel(full.getChannelData(ch).subarray(Math.floor(from * full.sampleRate), Math.floor(from * full.sampleRate) + len), ch);
-      }
-      return out;
-    } catch (e) { return null; }
+  // audio-clip.js весит ~400 КБ — грузим его только когда реально собираем видео,
+  // а не при каждом открытии страницы. <script> (а не fetch) — чтобы работало и на file://.
+  let clipScriptPromise = null;
+  function loadClipScript() {
+    if (typeof VIDEO_AUDIO_CLIP !== 'undefined') return Promise.resolve(VIDEO_AUDIO_CLIP);
+    if (!clipScriptPromise) {
+      clipScriptPromise = new Promise(res => {
+        const sc = document.createElement('script');
+        sc.src = AUDIO_CLIP_SCRIPT;
+        sc.onload = () => res(typeof VIDEO_AUDIO_CLIP !== 'undefined' ? VIDEO_AUDIO_CLIP : null);
+        sc.onerror = () => { clipScriptPromise = null; sc.remove(); res(null); };
+        document.head.appendChild(sc);
+      });
+    }
+    return clipScriptPromise;
   }
 
   /* Разбор трека: громкость и удары. По ним вся картинка потом «дышит» —
