@@ -1081,6 +1081,7 @@ function loginLocal(userId, nick) {
 
 async function logout() {
   if (!await showConfirm('Выйти из аккаунта?', 'Выйти', '⎋')) return;
+  $('#profile-backdrop').hidden = true;
   try { await db.ref('users/' + state.userId + '/online').set(false); } catch (e) {}
   stopMenuWatch();
   stopMatchWatch();
@@ -1198,7 +1199,6 @@ function renderHeader(u) {
   state.stats = st;   // профиль берёт её отсюда, без отдельного запроса
   $('#menu-stat-matches').textContent = st.matches || 0;
   $('#menu-stat-acc').textContent = accuracy(st.hits, st.misses) + '%';
-  $('#menu-stat-wins').textContent = st.wins || 0;
 }
 
 function renderInvites(obj) {
